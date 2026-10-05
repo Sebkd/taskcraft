@@ -32,13 +32,13 @@
 - [x] 3.1 `.github/workflows/ci.yml`: push в любую ветку и `workflow_dispatch`; задание `check` (fmt, clippy, test, doc, publish --dry-run) и задание `msrv` (1.99, `cargo check --workspace --all-features`)
 - [x] 3.2 В `check` — шаг, проверяющий `lints.workspace = true` в каждом `crates/*/Cargo.toml`
 - [x] 3.3 `.github/workflows/supply-chain.yml`: cargo-deny и `cargo vet --locked`; push при изменении манифестов, lock-файла, `deny.toml`, `supply-chain/**`; ежедневное расписание
-- [ ] 3.4 Push ветки, проверить на GitHub: оба workflow зелёные
+- [x] 3.4 Push ветки, проверить на GitHub: оба workflow зелёные
 
 ## 4. Финализация
 
 - [x] 4.1 Проверки отрицательных сценариев в отдельных временных ветках: `unsafe` → CI красный; зависимость с GPL → cargo-deny красный; ветки удалены
-- [ ] 4.2 **Вручную, владелец репозитория:** `cargo publish -p taskcraft` своим токеном crates.io; проверить, что `taskcraft 0.0.0` виден на crates.io и ведёт на GitHub
-- [ ] 4.3 Отметить строку `bootstrap-workspace` в таблице «Статус реализации» спецификации при `/opsx-apply`
+- [x] 4.2 **Вручную, владелец репозитория:** `cargo publish -p taskcraft` своим токеном crates.io; проверить, что `taskcraft 0.0.0` виден на crates.io и ведёт на GitHub
+- [x] 4.3 Отметить строку `bootstrap-workspace` в таблице «Статус реализации» спецификации при `/opsx-apply`
 
 ---
 
