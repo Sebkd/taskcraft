@@ -1,1 +1,7 @@
-docs/
+# OpenSpec toolchain — локальная установка, наружу не идёт
+/vendor/
+/.cursor/skills/
+/.cursor/commands/
+
+# Материалы — локально, в репозиторий не идут
+/docs/
