@@ -1,0 +1,15 @@
+[package]
+name = "taskcraft"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+description = "Background task queue for Rust on tokio: three-way source polling, retries as data, resource pools, graceful shutdown"
+keywords = ["queue", "background", "jobs", "tasks", "tokio"]
+categories = ["asynchronous", "concurrency"]
+
+[lints]
+workspace = true

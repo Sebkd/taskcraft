@@ -1,0 +1,49 @@
+name: Supply chain
+
+# Dependency checks: on any change to the dependency graph, and daily, so a new
+# advisory against an already locked dependency surfaces without a code change.
+on:
+  push:
+    paths:
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'deny.toml'
+      - 'supply-chain/**'
+      - '.github/workflows/supply-chain.yml'
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  cargo-vet:
+    name: cargo-vet
+    runs-on: ubuntu-latest
+    env:
+      CARGO_VET_VERSION: 0.10.2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo-vet
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.tool_cache }}/cargo-vet
+          key: cargo-vet-bin-${{ env.CARGO_VET_VERSION }}
+
+      - name: Add cargo-vet to PATH
+        run: echo "${{ runner.tool_cache }}/cargo-vet/bin" >> "$GITHUB_PATH"
+
+      - name: Install cargo-vet
+        run: cargo install --root "${{ runner.tool_cache }}/cargo-vet" --version "${{ env.CARGO_VET_VERSION }}" --locked cargo-vet
+
+      - name: Vet
+        run: cargo vet --locked
