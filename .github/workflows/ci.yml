@@ -1,0 +1,83 @@
+name: CI
+
+# Runs on GitHub's hosted runners. Development lives on Gitea; commits reach
+# GitHub through a push mirror, which pushes every branch and opens no pull
+# requests here, so every push is checked.
+on:
+  push:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: Check (stable)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # Every crate must opt into the shared lints, or `unsafe_code = "forbid"`
+      # and the clippy set silently stop applying to it.
+      - name: Workspace lints in every crate
+        run: |
+          missing=0
+          for manifest in crates/*/Cargo.toml; do
+            if ! grep -Pzq '\[lints\]\s*\nworkspace\s*=\s*true' "$manifest"; then
+              echo "::error file=$manifest::missing [lints] workspace = true"
+              missing=1
+            fi
+          done
+          exit $missing
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --all-features
+
+      - name: Docs
+        run: cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      # Catches missing metadata and internal dependency versions that drift
+      # from the crates they point at.
+      - name: Publish (dry run)
+        run: |
+          for manifest in crates/*/Cargo.toml; do
+            cargo publish --dry-run --locked --manifest-path "$manifest"
+          done
+
+  msrv:
+    name: Check MSRV (1.99)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.99
+        uses: dtolnay/rust-toolchain@1.99
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # Library surface only (no --all-targets): dev-dependencies may require a
+      # newer compiler than the crates' own MSRV.
+      - name: Check
+        run: cargo check --workspace --all-features --locked
