@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,12 +11,13 @@ use std::time::Duration;
 use crate::codec::{Codec, CodecError};
 use crate::error::ConfigError;
 use crate::handle::QueueHandle;
-use crate::handler::SharedData;
+use crate::handler::{BoxFuture, SharedData};
 use crate::metadata::MetadataRegistry;
+use crate::outcome::BoxError;
 use crate::poll::PollStrategy;
 use crate::registry::TaskRegistry;
 use crate::retry::RetryPolicy;
-use crate::source::Source;
+use crate::source::{AckPointSupport, Source};
 use crate::task::{AckPoint, Task};
 
 /// What the dead-letter hook receives: a message that could not be decoded.
@@ -43,6 +45,22 @@ impl<M> Clone for DeadLetterHook<M> {
             copy: self.copy,
         }
     }
+}
+
+/// The recovery hook, called once when the monitor starts.
+pub(crate) type RecoveryFn<Args> =
+    Box<dyn FnOnce() -> BoxFuture<'static, Result<Vec<Task<Args>>, BoxError>> + Send>;
+
+/// What an attempt that ran past the task timeout ends with (rule 2.3.16
+/// p. 4), whatever the handler returned.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum TimeoutOutcome {
+    /// Failed with "attempt timed out". The default.
+    #[default]
+    Abort,
+    /// Retried within the retry policy, like a "retry" outcome.
+    Retry,
 }
 
 type RejectFn<Args> = Arc<dyn Fn(Task<Args>) + Send + Sync>;
@@ -75,6 +93,8 @@ pub(crate) struct QueueConfig {
     pub(crate) poll: PollStrategy,
     pub(crate) cancel_grace: Duration,
     pub(crate) retry: RetryPolicy,
+    pub(crate) attempt_timeout: Option<Duration>,
+    pub(crate) timeout_outcome: TimeoutOutcome,
 }
 
 /// A queue: where tasks come from, how they are decoded, what runs them, and
@@ -90,6 +110,7 @@ pub struct Queue<S: Source, C, Svc, Args> {
     pub(crate) dead_letter: Option<DeadLetterHook<S::Message>>,
     pub(crate) overflow: OverflowPolicy<Args>,
     pub(crate) tasks: Arc<TaskRegistry>,
+    pub(crate) recovery: Option<RecoveryFn<Args>>,
     pub(crate) _args: PhantomData<fn() -> Args>,
 }
 
@@ -113,6 +134,8 @@ impl<S: Source, C: Codec<Args, S::Message>, Svc, Args> Queue<S, C, Svc, Args> {
                     poll: PollStrategy::default(),
                     cancel_grace: Duration::from_secs(30),
                     retry: RetryPolicy::default(),
+                    attempt_timeout: None,
+                    timeout_outcome: TimeoutOutcome::Abort,
                 },
                 source,
                 codec: Arc::new(codec),
@@ -122,6 +145,7 @@ impl<S: Source, C: Codec<Args, S::Message>, Svc, Args> Queue<S, C, Svc, Args> {
                 dead_letter: None,
                 overflow: OverflowPolicy::Wait { limit: None },
                 tasks: Arc::new(TaskRegistry::new()),
+                recovery: None,
                 _args: PhantomData,
             },
         }
@@ -154,6 +178,7 @@ impl<S: Source, C, Svc, Args> fmt::Debug for Queue<S, C, Svc, Args> {
             .field("config", &self.config)
             .field("dead_letter", &self.dead_letter.is_some())
             .field("overflow", &self.overflow)
+            .field("recovery", &self.recovery.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -226,6 +251,50 @@ impl<S: Source, C, Svc, Args> QueueBuilder<S, C, Svc, Args> {
         self
     }
 
+    /// Limits every attempt to `timeout`, counted from its start (rule
+    /// 2.3.16). On expiry the task's cancel flag is set, and after the cancel
+    /// grace the attempt is aborted. Default: no limit.
+    pub fn attempt_timeout(mut self, timeout: Duration) -> Self {
+        self.queue.config.attempt_timeout = Some(timeout);
+        self
+    }
+
+    /// What a timed-out attempt ends with. Default: abort.
+    pub fn timeout_outcome(mut self, outcome: TimeoutOutcome) -> Self {
+        self.queue.config.timeout_outcome = outcome;
+        self
+    }
+
+    /// Called once when the monitor starts, before the first poll (rule
+    /// 2.3.18). The tasks it returns are accepted — never rejected, waiting
+    /// for a slot if needed — and are not acknowledged to the source. An error
+    /// keeps the monitor from starting.
+    ///
+    /// Required when the queue acks on accept and the source is not a task
+    /// store: those tasks are acknowledged before they finish, so after a
+    /// crash only the consumer's own records can bring them back.
+    pub fn recover_with<F, Fut, E>(mut self, hook: F) -> Self
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Vec<Task<Args>>, E>> + Send + 'static,
+        E: Into<BoxError>,
+    {
+        self.queue.recovery = Some(Box::new(move || {
+            Box::pin(async move { hook().await.map_err(Into::into) })
+        }));
+        self
+    }
+
+    /// Declares that tasks accepted and acknowledged before a crash may be
+    /// lost: a recovery hook that returns nothing. For queues whose tasks
+    /// are cheap to lose or are sent again by their producer.
+    pub fn no_recovery(self) -> Self
+    where
+        Args: 'static,
+    {
+        self.recover_with(|| async { Ok::<_, BoxError>(Vec::new()) })
+    }
+
     /// The registry that names metadata types for this queue's codec and
     /// handlers.
     pub fn metadata_registry(mut self, registry: MetadataRegistry) -> Self {
@@ -259,7 +328,9 @@ impl<S: Source, C, Svc, Args> QueueBuilder<S, C, Svc, Args> {
     /// # Errors
     ///
     /// [`ConfigError`] for an empty name, a concurrency limit below 1, an
-    /// invalid poll strategy or a zero cancel grace.
+    /// invalid poll strategy or retry policy, a zero cancel grace or attempt
+    /// timeout, or ack on accept without a recovery hook on a source that is
+    /// not a task store.
     pub fn build(self) -> Result<Queue<S, C, Svc, Args>, ConfigError> {
         let config = &self.queue.config;
         if config.name.is_empty() {
@@ -270,10 +341,14 @@ impl<S: Source, C, Svc, Args> QueueBuilder<S, C, Svc, Args> {
         }
         config.poll.validate()?;
         config.retry.validate()?;
-        if config.cancel_grace.is_zero() {
+        if config.cancel_grace.is_zero() || config.attempt_timeout.is_some_and(|t| t.is_zero()) {
             return Err(ConfigError::InvalidDuration {
                 reason: "duration must be positive",
             });
+        }
+        let store = self.queue.source.capabilities().ack_point_support() == AckPointSupport::Fixed;
+        if config.ack_point == AckPoint::OnAccept && !store && self.queue.recovery.is_none() {
+            return Err(ConfigError::RecoveryRequired);
         }
         Ok(self.queue)
     }
@@ -304,6 +379,7 @@ mod tests {
                 IdentityCodec::new(),
                 task_fn(noop),
             )
+            .no_recovery()
         };
     }
 
@@ -330,6 +406,28 @@ mod tests {
             ),
             "invalid poll strategy: composition must not be empty"
         );
+        assert_eq!(
+            error(queue!("q").attempt_timeout(Duration::ZERO).build()),
+            "invalid duration: duration must be positive"
+        );
+        let unrecoverable = Queue::builder(
+            "q",
+            Arc::new(InMemorySource::<u32>::new(1)),
+            IdentityCodec::new(),
+            task_fn(noop),
+        );
+        assert_eq!(
+            error(unrecoverable.build()),
+            "ack-on-accept without a store requires a recovery hook"
+        );
+        let on_completion = Queue::builder(
+            "q",
+            Arc::new(InMemorySource::<u32>::new(1)),
+            IdentityCodec::new(),
+            task_fn(noop),
+        )
+        .ack_point(AckPoint::OnCompletion);
+        assert!(on_completion.build().is_ok());
         let queue = queue!("reports").concurrency(4).build().unwrap();
         assert_eq!((queue.name(), queue.config.concurrency), ("reports", 4));
     }

@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Once};
 
+use taskcraft::{CancellationToken, Monitor, ShutdownReport};
 use tracing::field::{Field, Visit};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::{Context, SubscriberExt};
@@ -101,4 +102,9 @@ impl<S: tracing::Subscriber> Layer<S> for Router {
             fields,
         });
     }
+}
+
+/// Runs the monitor; the tests' recovery hooks never fail.
+pub async fn run(monitor: Monitor, stop: CancellationToken) -> ShutdownReport {
+    monitor.run(stop).await.expect("recovery hooks succeed")
 }

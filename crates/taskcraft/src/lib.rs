@@ -4,9 +4,9 @@
 //!
 //! **Work in progress.** This version contains the task model and the source
 //! contract, handlers, queues and workers with retries, overflow policies and
-//! resource pools, push, status and cancellation by id. Recovery and the
-//! Kafka source follow in later versions; the first working release will be
-//! `0.1.0`.
+//! resource pools, push, status and cancellation by id, recovery on start and
+//! attempt timeouts. The Kafka source and the task store follow in later
+//! versions; the first working release will be `0.1.0`.
 //!
 //! The target behaviour is specified in
 //! [`openspec/specs/taskcraft/taskcraft.md`](https://github.com/Sebkd/taskcraft/blob/master/openspec/specs/taskcraft/taskcraft.md).
@@ -63,6 +63,12 @@
 //!   ([`CancelOutcome`]). **Task registry** — the queue's live tasks, from
 //!   accept to their final state: a busy id is never run twice, and finished
 //!   tasks take no memory.
+//! - **Recovery hook** ([`QueueBuilder::recover_with`]) — called when the
+//!   monitor starts, before the first poll; the tasks it returns are accepted
+//!   again. Required when a queue acks on accept and its source is not a task
+//!   store; [`QueueBuilder::no_recovery`] declares such tasks may be lost.
+//! - **Attempt timeout** ([`QueueBuilder::attempt_timeout`]) — the longest an
+//!   attempt may run; it then ends as [`TimeoutOutcome`] says.
 //! - **Cancel flag** ([`Cancel`]) — set by a cancel request or by shutdown; a
 //!   running handler stops on it or is aborted after the cancel grace.
 //! - **Test harness** (`taskcraft::testing`, feature `test-util`) — a source
@@ -96,7 +102,7 @@ mod worker;
 pub use attempt::{CatchPanic, catch_panic, outcome_of, run_attempt};
 pub use codec::{Codec, CodecError, IdentityCodec, JsonCodec};
 
-pub use error::{ConfigError, InvalidTransition, MetadataError};
+pub use error::{ConfigError, InvalidTransition, MetadataError, RecoveryError};
 pub use handle::{CancelOutcome, PushTaskError, QueueHandle};
 pub use handler::{
     Attempt, BoxFuture, Cancel, Data, FromTask, Handler, Meta, Rejection, SharedData, TaskFn,
@@ -108,7 +114,7 @@ pub use monitor::{Monitor, QueueReport, ShutdownReport, StopReason};
 pub use offset::OffsetTracker;
 pub use outcome::{BoxError, ErrorKind, IntoOutcome, Outcome, ResultExt, TaskError};
 pub use poll::{PollStrategy, Poller, Wakeup};
-pub use queue::{DeadLetter, Queue, QueueBuilder};
+pub use queue::{DeadLetter, Queue, QueueBuilder, TimeoutOutcome};
 pub use retry::RetryPolicy;
 pub use source::{
     AckOverrideUnsupported, AckPointSupport, Capabilities, CloseReason, DeferError, Polled,

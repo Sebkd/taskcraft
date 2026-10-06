@@ -1,5 +1,6 @@
 //! Error types of the task model.
 
+use crate::outcome::BoxError;
 use crate::state::TaskState;
 
 /// A configuration mistake caught while building queues or registries.
@@ -78,6 +79,11 @@ pub enum ConfigError {
         /// What is wrong, worded as in the configuration rules.
         reason: &'static str,
     },
+    /// The queue acks on accept and its source is not a task store, but no
+    /// recovery hook is set: a crash would lose accepted tasks (rule 2.3.9
+    /// p. 4).
+    #[error("ack-on-accept without a store requires a recovery hook")]
+    RecoveryRequired,
 }
 
 /// A failure to encode or parse task metadata.
@@ -120,4 +126,28 @@ pub struct InvalidTransition {
     pub from: TaskState,
     /// The requested state.
     pub to: TaskState,
+}
+
+/// A recovery hook failed; the monitor did not start (scenario 2.2.8).
+#[derive(Debug, thiserror::Error)]
+#[error("recovery failed: queue={queue}: {source}")]
+pub struct RecoveryError {
+    queue: String,
+    #[source]
+    source: BoxError,
+}
+
+impl RecoveryError {
+    pub(crate) fn new(queue: impl Into<String>, source: BoxError) -> Self {
+        Self {
+            queue: queue.into(),
+            source,
+        }
+    }
+
+    /// The queue whose hook failed.
+    #[must_use]
+    pub fn queue(&self) -> &str {
+        &self.queue
+    }
 }

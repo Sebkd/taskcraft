@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
 
 mod common;
-use common::Captured;
+use common::{Captured, run};
 
 const SEC: Duration = Duration::from_secs(1);
 
@@ -43,7 +43,7 @@ async fn until(limit: Duration, cond: impl Fn() -> bool) -> bool {
 
 fn spawn(monitor: Monitor) -> (JoinHandle<ShutdownReport>, CancellationToken) {
     let stop = CancellationToken::new();
-    (tokio::spawn(monitor.run(stop.clone())), stop)
+    (tokio::spawn(run(monitor, stop.clone())), stop)
 }
 
 /// (task argument, attempt number, virtual time since start) of every run.
@@ -82,6 +82,7 @@ async fn retries_until_success_and_acks_after() {
     let queue = Queue::builder("q", Arc::clone(&source), FaultyCodec::new(), handler)
         .retry_policy(policy(3, SEC))
         .ack_point(AckPoint::OnCompletion)
+        .no_recovery()
         .build()
         .unwrap();
     let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap());
@@ -112,6 +113,7 @@ async fn always_retry_runs_exactly_max_attempts() {
     });
     let queue = Queue::builder("q", Arc::clone(&source), FaultyCodec::new(), handler)
         .retry_policy(policy(3, SEC))
+        .no_recovery()
         .build()
         .unwrap();
     let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap());
@@ -152,6 +154,7 @@ async fn defer_in_process_does_not_use_up_attempts() {
     });
     let queue = Queue::builder("q", Arc::clone(&source), FaultyCodec::new(), handler)
         .retry_policy(policy(2, SEC))
+        .no_recovery()
         .build()
         .unwrap();
     let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap());
@@ -186,6 +189,7 @@ async fn defer_goes_to_a_source_that_supports_it() {
         }
     });
     let queue = Queue::builder("q", Arc::clone(&source), IdentityCodec::new(), handler)
+        .no_recovery()
         .build()
         .unwrap();
     let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap());
@@ -220,6 +224,7 @@ async fn shutdown_ends_a_retry_pause_at_once() {
     });
     let queue = Queue::builder("q", Arc::clone(&source), FaultyCodec::new(), handler)
         .retry_policy(policy(3, 300 * SEC))
+        .no_recovery()
         .build()
         .unwrap();
     let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap());
@@ -252,6 +257,7 @@ async fn shutdown_report_counts_a_task_in_a_pause() {
         .concurrency(2)
         .retry_policy(policy(3, 300 * SEC))
         .cancel_grace(SEC)
+        .no_recovery()
         .build()
         .unwrap();
     let (monitor, stop) = spawn(
@@ -295,6 +301,7 @@ async fn second_task_start(hold_slot: bool) -> Duration {
             hold_slot,
             ..policy(2, 60 * SEC)
         })
+        .no_recovery()
         .build()
         .unwrap();
     let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap());

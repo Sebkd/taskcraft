@@ -36,10 +36,10 @@ where
     Svc::Error: Into<taskcraft::BoxError>,
     Svc::Future: Send,
 {
-    let queue = builder.build().unwrap();
+    let queue = builder.no_recovery().build().unwrap();
     let stop = CancellationToken::new();
     let monitor = monitor.register(queue).unwrap();
-    let handle = tokio::spawn(monitor.run(stop.clone()));
+    let handle = tokio::spawn(common::run(monitor, stop.clone()));
     (handle, stop)
 }
 
@@ -250,10 +250,12 @@ async fn source_errors_restart_with_growing_delays() {
     )
     .concurrency(2)
     .poll_strategy(PollStrategy::Interval(Duration::from_millis(100)))
+    .no_recovery()
     .build()
     .unwrap();
     let stop = CancellationToken::new();
-    let worker = tokio::spawn(Monitor::new().register(queue).unwrap().run(stop.clone()));
+    let monitor = Monitor::new().register(queue).unwrap();
+    let worker = tokio::spawn(common::run(monitor, stop.clone()));
 
     source.inner.enqueue(Task::new(1));
     // Acked on accept: the task is running from here on.
@@ -502,11 +504,12 @@ impl Runner for WorkerRunner {
                 jitter: 0.0,
                 hold_slot: false,
             })
+            .no_recovery()
             .build()
             .unwrap();
         let monitor = Monitor::new().register(queue).unwrap();
         Box::pin(async move {
-            monitor.run(setup.stop).await;
+            monitor.run(setup.stop).await.unwrap();
         })
     }
 }

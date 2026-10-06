@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
 
 mod common;
-use common::Captured;
+use common::{Captured, run};
 
 const SEC: Duration = Duration::from_secs(1);
 const HOUR: Duration = Duration::from_secs(3600);
@@ -57,7 +57,7 @@ fn long(
 
 fn spawn(monitor: Monitor) -> (JoinHandle<ShutdownReport>, CancellationToken) {
     let stop = CancellationToken::new();
-    (tokio::spawn(monitor.run(stop.clone())), stop)
+    (tokio::spawn(run(monitor, stop.clone())), stop)
 }
 
 /// Criterion 13: two run, two wait, and the intake keeps polling.
@@ -74,6 +74,7 @@ async fn waiting_tasks_do_not_block_intake() {
     .concurrency(2)
     .wait_limit(10)
     .cancel_grace(SEC)
+    .no_recovery()
     .build()
     .unwrap();
     let (monitor, stop) = spawn(
@@ -110,6 +111,7 @@ async fn full_waiting_room_stops_polling() {
     )
     .wait_limit(1)
     .cancel_grace(SEC)
+    .no_recovery()
     .build()
     .unwrap();
     let (monitor, stop) = spawn(
@@ -154,6 +156,7 @@ async fn reject_hands_the_task_to_the_hook() {
         task_fn(long(&started)),
     )
     .reject_with(move |task: Task<u32>| r.lock().unwrap().push(task.id().clone()))
+    .no_recovery()
     .build()
     .unwrap();
     let (monitor, stop) = spawn(
@@ -192,6 +195,7 @@ async fn shutdown_interrupts_restart_and_slot_wait() {
     )
     .wait_limit(2)
     .cancel_grace(SEC)
+    .no_recovery()
     .build()
     .unwrap();
     let monitor = Monitor::new()
@@ -236,6 +240,7 @@ async fn every_outcome_frees_the_slot_and_the_pool() {
     });
     let queue = Queue::builder("q", Arc::clone(&source), FaultyCodec::new(), service)
         .pool("unzip", 1)
+        .no_recovery()
         .build()
         .unwrap();
     let (monitor, stop) = spawn(
@@ -271,6 +276,7 @@ async fn shutdown_cancels_a_task_waiting_for_a_pool() {
     .concurrency(2)
     .pool("pack", 1)
     .cancel_grace(SEC)
+    .no_recovery()
     .build()
     .unwrap();
     let monitor = Monitor::new()
@@ -317,6 +323,7 @@ async fn crossed_pool_sets_do_not_deadlock() {
     .concurrency(3)
     .pool("a", 1)
     .pool("b", 1)
+    .no_recovery()
     .build()
     .unwrap();
     let queue_ba = Queue::builder(
@@ -328,6 +335,7 @@ async fn crossed_pool_sets_do_not_deadlock() {
     .concurrency(3)
     .pool("b", 1)
     .pool("a", 1)
+    .no_recovery()
     .build()
     .unwrap();
     let monitor = Monitor::new()
@@ -363,6 +371,7 @@ fn pools_are_checked_on_registration() {
             task_fn(|_: u32| async {}),
         )
         .pool(pool, permits)
+        .no_recovery()
         .build()
         .unwrap()
     };
