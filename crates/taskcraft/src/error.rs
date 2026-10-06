@@ -65,6 +65,12 @@ pub enum ConfigError {
         /// What is wrong.
         reason: &'static str,
     },
+    /// A retry policy out of range (spec 2.10).
+    #[error("invalid retry policy: {reason}")]
+    InvalidRetryPolicy {
+        /// What is wrong, worded as in the configuration rules.
+        reason: &'static str,
+    },
     /// A poll strategy with a zero duration, a minimum above its maximum or
     /// an empty composition.
     #[error("invalid poll strategy: {reason}")]

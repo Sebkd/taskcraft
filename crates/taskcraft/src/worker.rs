@@ -20,6 +20,7 @@ use crate::monitor::{QueueReport, StopReason, WorkerContext};
 use crate::outcome::{BoxError, Outcome};
 use crate::poll::{Poller, Wakeup};
 use crate::queue::{DeadLetter, OverflowPolicy, Queue};
+use crate::retry::RetryPolicy;
 use crate::source::{Polled, Source};
 use crate::state::{Lifecycle, TaskState};
 use crate::status::FinishReason;
@@ -46,7 +47,7 @@ enum Slot {
     Held(OwnedSemaphorePermit),
     /// To be waited for, holding a place in the waiting room meanwhile.
     Wait {
-        place: OwnedSemaphorePermit,
+        place: Option<OwnedSemaphorePermit>,
         slots: Arc<Semaphore>,
     },
 }
@@ -70,6 +71,8 @@ struct ExecCtx<S: Source, C> {
     ack_errors: mpsc::UnboundedSender<String>,
     stop: CancellationToken,
     pools: Vec<PoolClaim>,
+    slots: Arc<Semaphore>,
+    retry: RetryPolicy,
 }
 
 /// Sleeps the restart delay unless stopped; returns `true` when stopped.
@@ -138,6 +141,7 @@ where
     );
 
     let (ack_errors, mut ack_failures) = mpsc::unbounded_channel();
+    let slots = Arc::new(Semaphore::new(config.concurrency));
     let exec = Arc::new(ExecCtx {
         queue: Arc::clone(&name),
         source: Arc::clone(&source),
@@ -148,8 +152,9 @@ where
         ack_errors: ack_errors.clone(),
         stop: ctx.stop.clone(),
         pools,
+        slots: Arc::clone(&slots),
+        retry: config.retry,
     });
-    let slots = Arc::new(Semaphore::new(config.concurrency));
     let (reject, wait_limit) = match overflow {
         OverflowPolicy::Wait { limit } => (None, limit.unwrap_or(config.concurrency)),
         OverflowPolicy::Reject(hook) => (Some(hook), 0),
@@ -277,7 +282,7 @@ where
                     Gate::Waiting(place) => match Arc::clone(&slots).try_acquire_owned() {
                         Ok(permit) => Slot::Held(permit),
                         Err(_) => Slot::Wait {
-                            place,
+                            place: Some(place),
                             slots: Arc::clone(&slots),
                         },
                     },
@@ -472,7 +477,16 @@ async fn wait_all(
     }
 }
 
-/// Runs one task to its final state (rules 2.3.2, 2.3.9, 2.3.15 p. 4).
+/// What follows an attempt.
+enum Next {
+    /// A final state with its reason.
+    Finish(TaskState, Option<FinishReason>),
+    /// Wait, then run again (rules 2.3.4, 2.3.6).
+    Pause(Duration),
+}
+
+/// Runs one task to its final state, retrying as the queue's policy allows
+/// (rules 2.3.2–2.3.6, 2.3.9, 2.3.15 p. 4).
 async fn execute<S, C, Svc, Args>(
     mut task: Task<Args>,
     receipt: S::Receipt,
@@ -491,110 +505,218 @@ where
     Args: Clone + Send + 'static,
 {
     let mut life = Lifecycle::accepted();
-    // Accepted: wait for the slot, then for the pools in name order. Shutdown
-    // cancels a task that is still waiting (rule 2.3.14 p. 4).
-    let permit = match slot {
-        Slot::Held(permit) => permit,
-        Slot::Wait { place, slots } => {
-            let permit = tokio::select! {
-                biased;
-                () = ctx.stop.cancelled() => {
-                    return cancel_waiting(&ctx, &mut life, task.id());
-                }
-                permit = slots.acquire_owned() => permit.expect("slots are never closed"),
-            };
-            drop(place);
-            permit
-        }
-    };
-    let mut pool_permits = Vec::with_capacity(ctx.pools.len());
-    for claim in &ctx.pools {
-        let permits = tokio::select! {
-            biased;
-            () = ctx.stop.cancelled() => {
-                return cancel_waiting(&ctx, &mut life, task.id());
-            }
-            permits = Arc::clone(&claim.semaphore).acquire_many_owned(claim.permits) => {
-                permits.expect("pools are never closed")
+    let mut first = Some(slot);
+    let mut held: Option<OwnedSemaphorePermit> = None;
+    loop {
+        // Accepted: the slot (from intake, kept through the pause, or taken
+        // again after it), then the pools in name order. Shutdown cancels a
+        // task that is still waiting (rule 2.3.14 p. 4).
+        let slot = match (held.take(), first.take()) {
+            (Some(permit), _) | (None, Some(Slot::Held(permit))) => Slot::Held(permit),
+            (None, Some(waiting)) => waiting,
+            (None, None) => Slot::Wait {
+                place: None,
+                slots: Arc::clone(&ctx.slots),
+            },
+        };
+        let permit = match slot {
+            Slot::Held(permit) => permit,
+            Slot::Wait { place, slots } => {
+                let permit = tokio::select! {
+                    biased;
+                    () = ctx.stop.cancelled() => {
+                        return cancel_waiting(&ctx, &mut life, &task);
+                    }
+                    permit = slots.acquire_owned() => permit.expect("slots are never closed"),
+                };
+                drop(place);
+                permit
             }
         };
-        pool_permits.push(permits);
+        let mut pool_permits = Vec::with_capacity(ctx.pools.len());
+        for claim in &ctx.pools {
+            let permits = tokio::select! {
+                biased;
+                () = ctx.stop.cancelled() => {
+                    return cancel_waiting(&ctx, &mut life, &task);
+                }
+                permits = Arc::clone(&claim.semaphore).acquire_many_owned(claim.permits) => {
+                    permits.expect("pools are never closed")
+                }
+            };
+            pool_permits.push(permits);
+        }
+
+        advance(&mut life, TaskState::Running);
+        task.begin_attempt();
+        let request = TaskRequest::new(
+            task.clone(),
+            Arc::clone(&ctx.registry),
+            Arc::clone(&ctx.shared),
+        );
+        let outcome = attempt(&mut service, request, &ctx).await;
+        let next = if cancel.is_cancelled() && !matches!(outcome, Outcome::Panic { .. }) {
+            Next::Finish(
+                TaskState::Cancelled,
+                Some(FinishReason::CancelledByShutdown),
+            )
+        } else {
+            decide(outcome, &mut task, receipt.clone(), &ctx).await
+        };
+
+        match next {
+            Next::Finish(state, reason) => {
+                advance(&mut life, state);
+                log_outcome(
+                    &ctx.queue,
+                    task.id(),
+                    task.attempt(),
+                    state,
+                    reason.as_ref(),
+                );
+                let acknowledged_by_defer = state == TaskState::Deferred;
+                let cancelled_by_shutdown = reason == Some(FinishReason::CancelledByShutdown);
+                if ack_later
+                    && !acknowledged_by_defer
+                    && !cancelled_by_shutdown
+                    && let Err(e) = ctx.source.ack(receipt).await
+                {
+                    let _ = ctx.ack_errors.send(e.to_string());
+                }
+                drop(pool_permits);
+                drop(permit);
+                return TaskEnd::Finished;
+            }
+            Next::Pause(pause) => {
+                // Waiting to retry: pools go back always, the slot unless the
+                // policy keeps it (rule 2.3.5).
+                advance(&mut life, TaskState::RetryWaiting);
+                drop(pool_permits);
+                if ctx.retry.hold_slot {
+                    held = Some(permit);
+                } else {
+                    drop(permit);
+                }
+                tokio::select! {
+                    biased;
+                    () = ctx.stop.cancelled() => {
+                        return cancel_waiting(&ctx, &mut life, &task);
+                    }
+                    () = sleep(pause) => {}
+                }
+                advance(&mut life, TaskState::Accepted);
+            }
+        }
     }
-    advance(&mut life, TaskState::Running);
-    task.begin_attempt();
-    let id = task.id().clone();
-    let attempt = task.attempt();
-    let span = debug_span!("taskcraft.attempt", queue = %ctx.queue, task_id = %id, attempt);
-    async move {
+}
+
+/// One attempt in its span; panics and service errors are outcomes already.
+async fn attempt<S, C, Svc, Args>(
+    service: &mut Svc,
+    request: TaskRequest<Args>,
+    ctx: &ExecCtx<S, C>,
+) -> Outcome
+where
+    S: Source,
+    Svc: tower::Service<TaskRequest<Args>, Response = Outcome>,
+    Svc::Error: Into<BoxError>,
+{
+    let id = request.task().id().clone();
+    let number = request.task().attempt();
+    let span =
+        debug_span!("taskcraft.attempt", queue = %ctx.queue, task_id = %id, attempt = number);
+    async {
         debug!(
             event = "task",
             action = "started",
             "task started: queue={}, task_id={}, attempt={}",
             ctx.queue,
             id,
-            attempt
+            number
         );
-        let request = TaskRequest::new(
-            task.clone(),
-            Arc::clone(&ctx.registry),
-            Arc::clone(&ctx.shared),
-        );
-        let outcome = run_attempt(&mut service, request).await;
-
-        let (state, reason) = if cancel.is_cancelled() && !matches!(outcome, Outcome::Panic { .. })
-        {
-            (
-                TaskState::Cancelled,
-                Some(FinishReason::CancelledByShutdown),
-            )
-        } else {
-            match outcome {
-                Outcome::Success => (TaskState::Succeeded, None),
-                Outcome::Abort { reason } => (TaskState::Failed, Some(reason)),
-                Outcome::Panic { message } => {
-                    (TaskState::Panicked, Some(FinishReason::Panic(message)))
-                }
-                Outcome::Defer { delay, .. } if ctx.supports_defer => {
-                    match defer(&ctx, task, receipt.clone(), delay).await {
-                        Ok(()) => (TaskState::Deferred, None),
-                        Err(e) => (TaskState::Failed, Some(FinishReason::Handler(e))),
-                    }
-                }
-                // No retry policy yet: the default limit of one attempt is
-                // exhausted by the first "retry" (spec 2.8).
-                Outcome::Retry { .. } | Outcome::Defer { .. } => {
-                    (TaskState::Failed, Some(FinishReason::AttemptsExhausted))
-                }
-            }
-        };
-        advance(&mut life, state);
-        log_outcome(&ctx.queue, &id, attempt, state, reason.as_ref());
-
-        let acknowledged_by_defer = state == TaskState::Deferred;
-        let cancelled_by_shutdown = reason == Some(FinishReason::CancelledByShutdown);
-        if ack_later
-            && !acknowledged_by_defer
-            && !cancelled_by_shutdown
-            && let Err(e) = ctx.source.ack(receipt).await
-        {
-            let _ = ctx.ack_errors.send(e.to_string());
-        }
-        drop(pool_permits);
-        drop(permit);
+        run_attempt(service, request).await
     }
     .instrument(span)
-    .await;
-    TaskEnd::Finished
+    .await
+}
+
+/// What the outcome of an attempt leads to (rules 2.3.2, 2.3.3, 2.3.6).
+async fn decide<S, C, Args>(
+    outcome: Outcome,
+    task: &mut Task<Args>,
+    receipt: S::Receipt,
+    ctx: &ExecCtx<S, C>,
+) -> Next
+where
+    S: Source,
+    C: Codec<Args, S::Message>,
+    Args: Clone,
+{
+    match outcome {
+        Outcome::Success => Next::Finish(TaskState::Succeeded, None),
+        Outcome::Abort { reason } => Next::Finish(TaskState::Failed, Some(reason)),
+        Outcome::Panic { message } => {
+            Next::Finish(TaskState::Panicked, Some(FinishReason::Panic(message)))
+        }
+        Outcome::Retry { reason, delay } => {
+            if !ctx.retry.allows_retry(task.retries()) {
+                return Next::Finish(TaskState::Failed, Some(FinishReason::AttemptsExhausted));
+            }
+            task.count_retry();
+            let pause = ctx.retry.pause(task.retries(), delay);
+            warn!(
+                event = "task",
+                action = "retry",
+                "task will be retried: queue={}, task_id={}, attempt={}, pause={:?}, reason={:?}",
+                ctx.queue,
+                task.id(),
+                task.attempt(),
+                pause,
+                reason.to_string()
+            );
+            Next::Pause(pause)
+        }
+        Outcome::Defer { delay, .. } => {
+            if ctx.supports_defer {
+                match defer(ctx, task.clone(), receipt, delay).await {
+                    Ok(()) => return Next::Finish(TaskState::Deferred, None),
+                    Err(error) => warn!(
+                        event = "task",
+                        action = "defer_failed",
+                        "defer failed, handled in process: queue={}, task_id={}, error={:?}",
+                        ctx.queue,
+                        task.id(),
+                        error
+                    ),
+                }
+            } else {
+                debug!(
+                    event = "task",
+                    action = "defer_in_process",
+                    "defer handled in process: queue={}, task_id={}",
+                    ctx.queue,
+                    task.id()
+                );
+            }
+            // Not now rather than failed: no retry is counted and the
+            // pause is not capped (rule 2.3.6 p. 2).
+            Next::Pause(delay)
+        }
+    }
 }
 
 /// A task cancelled by shutdown while still waiting for a slot or a pool:
 /// "Accepted" → "Cancelled", no ack (scenario 2.2.7).
-fn cancel_waiting<S: Source, C>(ctx: &ExecCtx<S, C>, life: &mut Lifecycle, id: &TaskId) -> TaskEnd {
+fn cancel_waiting<S: Source, C, Args>(
+    ctx: &ExecCtx<S, C>,
+    life: &mut Lifecycle,
+    task: &Task<Args>,
+) -> TaskEnd {
     advance(life, TaskState::Cancelled);
     log_outcome(
         &ctx.queue,
-        id,
-        0,
+        task.id(),
+        task.attempt(),
         TaskState::Cancelled,
         Some(&FinishReason::CancelledByShutdown),
     );
