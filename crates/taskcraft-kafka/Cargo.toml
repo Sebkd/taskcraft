@@ -1,0 +1,34 @@
+[package]
+name = "taskcraft-kafka"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Kafka source for taskcraft: offsets committed by the commit boundary, ids from message keys, metadata from headers"
+keywords = ["queue", "kafka", "background", "tasks", "tokio"]
+categories = ["asynchronous", "concurrency"]
+# Published together with `taskcraft` 0.1.0: the `taskcraft` on crates.io
+# is still the 0.0.0 placeholder this crate cannot build against.
+publish = false
+
+[dependencies]
+rdkafka = { version = "0.39", default-features = false, features = ["libz", "tokio"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+taskcraft = { path = "../taskcraft", version = "0.0.0" }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+serde = { workspace = true, features = ["derive"] }
+taskcraft = { path = "../taskcraft", features = ["test-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry"] }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

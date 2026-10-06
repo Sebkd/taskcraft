@@ -240,6 +240,14 @@ impl MetadataRegistry {
         self.by_type.get(&TypeId::of::<T>()).map(|e| e.name)
     }
 
+    /// Whether `name` names metadata: a registered type or the reserved
+    /// [`TRACE_PARENT`]. Sources that read metadata from transport headers
+    /// take only such names (spec 2.12).
+    #[must_use]
+    pub fn is_registered(&self, name: &str) -> bool {
+        name == TRACE_PARENT || self.by_name.contains_key(name)
+    }
+
     /// Encodes metadata as a JSON object of stable name → value (spec 2.7.2).
     ///
     /// Encoded values carried from outside are written back unchanged unless
@@ -337,6 +345,14 @@ mod tests {
             .register::<String>(TRACE_PARENT)
             .unwrap_err();
         assert_eq!(err.to_string(), "reserved metadata name: trace_parent");
+    }
+
+    #[test]
+    fn registered_names_include_the_reserved_one() {
+        let registry = registry();
+        assert!(registry.is_registered("report.priority"));
+        assert!(registry.is_registered(TRACE_PARENT));
+        assert!(!registry.is_registered("content-type"));
     }
 
     #[test]
