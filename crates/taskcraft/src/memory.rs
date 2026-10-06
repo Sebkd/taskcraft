@@ -1,0 +1,294 @@
+//! The in-memory source (spec 2.6).
+
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::convert::Infallible;
+use std::fmt;
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
+use tokio::time::Instant;
+
+use crate::source::{
+    AckPointSupport, Capabilities, CloseReason, DeferError, Polled, PushError, PushResult, Source,
+    WakeHandle, WakeSignal,
+};
+use crate::task::{Task, TaskId};
+
+/// Identifies one delivery of an [`InMemorySource`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Delivery(u64);
+
+struct State<Args> {
+    ready: VecDeque<Task<Args>>,
+    deferred: BTreeMap<(Instant, u64), Task<Args>>,
+    in_flight: HashMap<u64, TaskId>,
+    held: HashSet<TaskId>,
+    closed: bool,
+    next: u64,
+}
+
+/// A bounded source in process memory: accepts pushes, acks per task and
+/// supports deferred redelivery. Tasks do not survive the process.
+///
+/// Capacity counts every task the source holds: ready, deferred and handed
+/// out but not yet acknowledged.
+pub struct InMemorySource<Args> {
+    state: Mutex<State<Args>>,
+    capacity: usize,
+    wake: WakeHandle,
+}
+
+impl<Args> InMemorySource<Args> {
+    /// The default capacity (spec 2.8).
+    pub const DEFAULT_CAPACITY: usize = 10_000;
+
+    /// A source holding at most `capacity` tasks.
+    ///
+    /// # Panics
+    ///
+    /// If `capacity` is zero.
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        assert!(
+            capacity >= 1,
+            "in-memory source capacity must be at least 1"
+        );
+        Self {
+            state: Mutex::new(State {
+                ready: VecDeque::new(),
+                deferred: BTreeMap::new(),
+                in_flight: HashMap::new(),
+                held: HashSet::new(),
+                closed: false,
+                next: 0,
+            }),
+            capacity,
+            wake: WakeHandle::new(),
+        }
+    }
+
+    /// Closes the source: pushes are refused, and once the remaining ready
+    /// and deferred tasks are handed out, polls answer "closed".
+    pub fn close(&self) {
+        self.lock().closed = true;
+        self.wake.wake();
+    }
+
+    /// Number of tasks held: ready, deferred and handed out but unacknowledged.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.lock().held.len()
+    }
+
+    /// Whether the source holds no task.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn lock(&self) -> MutexGuard<'_, State<Args>> {
+        // A panic while holding the lock cannot leave the state half-updated:
+        // every critical section below is a few infallible collection calls.
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl<Args> Default for InMemorySource<Args> {
+    fn default() -> Self {
+        Self::new(Self::DEFAULT_CAPACITY)
+    }
+}
+
+impl<Args> fmt::Debug for InMemorySource<Args> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = self.lock();
+        f.debug_struct("InMemorySource")
+            .field("capacity", &self.capacity)
+            .field("ready", &state.ready.len())
+            .field("deferred", &state.deferred.len())
+            .field("in_flight", &state.in_flight.len())
+            .field("closed", &state.closed)
+            .finish()
+    }
+}
+
+impl<Args: Send + 'static> Source for InMemorySource<Args> {
+    type Message = Task<Args>;
+    type Receipt = Delivery;
+    type Error = Infallible;
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::new(AckPointSupport::PerTask)
+            .with_push()
+            .with_defer()
+    }
+
+    async fn poll(&self) -> Result<Polled<Task<Args>, Delivery>, Infallible> {
+        let mut state = self.lock();
+        let now = Instant::now();
+        while let Some(entry) = state.deferred.first_entry() {
+            if entry.key().0 > now {
+                break;
+            }
+            let task = entry.remove();
+            state.ready.push_back(task);
+        }
+        if let Some(task) = state.ready.pop_front() {
+            let n = state.next;
+            state.next = n.wrapping_add(1);
+            state.in_flight.insert(n, task.id().clone());
+            return Ok(Polled::Task {
+                message: task,
+                receipt: Delivery(n),
+            });
+        }
+        if state.closed && state.deferred.is_empty() {
+            return Ok(Polled::Closed(CloseReason::new("in-memory source closed")));
+        }
+        Ok(Polled::Empty)
+    }
+
+    async fn ack(&self, receipt: Delivery) -> Result<(), Infallible> {
+        let mut state = self.lock();
+        if let Some(id) = state.in_flight.remove(&receipt.0) {
+            state.held.remove(&id);
+        }
+        Ok(())
+    }
+
+    fn subscribe(&self) -> Option<WakeSignal> {
+        Some(self.wake.subscribe())
+    }
+
+    async fn push(
+        &self,
+        id: &TaskId,
+        message: Task<Args>,
+    ) -> Result<PushResult, PushError<Infallible>> {
+        {
+            let mut state = self.lock();
+            if state.closed {
+                return Err(PushError::Closed);
+            }
+            if state.held.contains(id) {
+                return Ok(PushResult::Duplicate);
+            }
+            if state.held.len() >= self.capacity {
+                return Ok(PushResult::Full);
+            }
+            state.held.insert(id.clone());
+            state.ready.push_back(message);
+        }
+        self.wake.wake();
+        Ok(PushResult::Stored)
+    }
+
+    async fn defer(
+        &self,
+        receipt: Delivery,
+        message: Task<Args>,
+        at: Instant,
+    ) -> Result<(), DeferError<Infallible>> {
+        let mut state = self.lock();
+        state.in_flight.remove(&receipt.0);
+        let n = state.next;
+        state.next = n.wrapping_add(1);
+        state.deferred.insert((at, n), message);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    fn task(id: &str) -> Task<u32> {
+        Task::new(0).with_id(id)
+    }
+
+    async fn push(source: &InMemorySource<u32>, id: &str) -> PushResult {
+        source.push(&TaskId::new(id), task(id)).await.unwrap()
+    }
+
+    async fn take(source: &InMemorySource<u32>) -> (Task<u32>, Delivery) {
+        match source.poll().await.unwrap() {
+            Polled::Task { message, receipt } => (message, receipt),
+            other => panic!("expected a task, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn capacity_counts_every_held_task() {
+        let source = InMemorySource::new(2);
+        assert_eq!(push(&source, "a").await, PushResult::Stored);
+        assert_eq!(push(&source, "b").await, PushResult::Stored);
+        assert_eq!(push(&source, "c").await, PushResult::Full);
+        assert_eq!(source.len(), 2);
+
+        // Handed out but unacknowledged still counts.
+        let (_, receipt) = take(&source).await;
+        assert_eq!(push(&source, "c").await, PushResult::Full);
+        source.ack(receipt).await.unwrap();
+        assert_eq!(push(&source, "c").await, PushResult::Stored);
+    }
+
+    #[tokio::test]
+    async fn duplicate_ids_are_refused_until_acked() {
+        let source = InMemorySource::new(10);
+        assert_eq!(push(&source, "a").await, PushResult::Stored);
+        assert_eq!(push(&source, "a").await, PushResult::Duplicate);
+        let (_, receipt) = take(&source).await;
+        assert_eq!(push(&source, "a").await, PushResult::Duplicate);
+        source.ack(receipt).await.unwrap();
+        source.ack(receipt).await.unwrap(); // idempotent
+        assert_eq!(push(&source, "a").await, PushResult::Stored);
+    }
+
+    #[tokio::test]
+    async fn empty_is_not_closed() {
+        let source = InMemorySource::<u32>::new(10);
+        for _ in 0..1000 {
+            assert!(matches!(source.poll().await.unwrap(), Polled::Empty));
+        }
+        assert_eq!(push(&source, "late").await, PushResult::Stored);
+        take(&source).await;
+        source.close();
+        assert!(matches!(source.poll().await.unwrap(), Polled::Closed(_)));
+        assert!(matches!(
+            source.push(&TaskId::new("x"), task("x")).await,
+            Err(PushError::Closed)
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deferred_task_returns_when_due() {
+        let source = InMemorySource::new(10);
+        assert_eq!(push(&source, "a").await, PushResult::Stored);
+        let (delivered, receipt) = take(&source).await;
+        let at = Instant::now() + Duration::from_secs(60);
+        source.defer(receipt, delivered, at).await.unwrap();
+        source.close();
+
+        assert!(matches!(source.poll().await.unwrap(), Polled::Empty));
+        assert!(matches!(
+            source.push(&TaskId::new("b"), task("b")).await,
+            Err(PushError::Closed)
+        ));
+        tokio::time::advance(Duration::from_secs(60)).await;
+        let (again, receipt) = take(&source).await;
+        assert_eq!(again.id().as_str(), "a");
+        source.ack(receipt).await.unwrap();
+        assert!(matches!(source.poll().await.unwrap(), Polled::Closed(_)));
+        assert!(source.is_empty());
+    }
+
+    #[tokio::test]
+    async fn push_wakes_subscribers() {
+        let source = InMemorySource::new(10);
+        let mut signal = source.subscribe().unwrap();
+        signal.mark_seen();
+        assert_eq!(push(&source, "a").await, PushResult::Stored);
+        assert!(signal.changed().await);
+    }
+}
