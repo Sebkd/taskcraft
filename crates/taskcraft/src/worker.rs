@@ -536,15 +536,19 @@ where
     if let Some(listener) = &listener {
         listener.abort();
     }
-    let graceful = matches!(reason, StopReason::Shutdown);
     let (completed, cancelled, aborted) = drain(
         &mut running,
         &mut ids,
-        &tasks,
-        &name,
-        &drain_cancel,
-        graceful.then_some(ctx.shutdown_timeout),
-        config.cancel_grace,
+        Drain {
+            tasks: &tasks,
+            observers: &observers,
+            queue: &name,
+            cancel: &drain_cancel,
+            stop,
+            stopped: matches!(reason, StopReason::Shutdown),
+            timeout: ctx.shutdown_timeout,
+            grace: config.cancel_grace,
+        },
     )
     .await;
     drop(exec);
@@ -607,50 +611,106 @@ fn joined_id<T>(joined: &Result<(tokio::task::Id, T), tokio::task::JoinError>) -
     }
 }
 
-/// Waits for running tasks: without a timeout when the source closed; with
-/// the shutdown timeout, then cancellation, then abort after `grace` on
-/// shutdown (rule 2.3.14). Returns (completed, cancelled, aborted).
+/// What the drain needs besides the running tasks.
+struct Drain<'a> {
+    tasks: &'a TaskRegistry,
+    observers: &'a Observers,
+    queue: &'a str,
+    /// The parent of every task's cancel flag.
+    cancel: &'a CancellationToken,
+    /// The shutdown signal.
+    stop: &'a CancellationToken,
+    /// Intake ended by the shutdown signal rather than a closed source.
+    stopped: bool,
+    timeout: Duration,
+    grace: Duration,
+}
+
+/// Waits for running tasks (rule 2.3.14). After a closed source it waits
+/// for them to end on their own — until the shutdown signal, if one comes
+/// (transition 2.4.2.13). From the signal on: the shutdown timeout, then
+/// the cancel flag, then the cancel grace, then the abort. Returns
+/// (completed, cancelled, aborted).
 async fn drain(
     running: &mut JoinSet<TaskEnd>,
     ids: &mut HashMap<tokio::task::Id, TaskId>,
-    tasks: &TaskRegistry,
-    queue: &str,
-    cancel: &CancellationToken,
-    shutdown_timeout: Option<Duration>,
-    grace: Duration,
+    d: Drain<'_>,
 ) -> (u32, u32, u32) {
     let mut counts = Counts::default();
-    let Some(timeout) = shutdown_timeout else {
-        while let Some(joined) = running.join_next_with_id().await {
-            ids.remove(&joined_id(&joined));
-            counts.add(&joined);
-        }
+    if !d.stopped && wait_all_or_stop(running, ids, d.stop, &mut counts).await {
         return (counts.completed, counts.cancelled, 0);
-    };
-    if wait_all(running, ids, Instant::now() + timeout, &mut counts).await {
+    }
+    if wait_all(running, ids, Instant::now() + d.timeout, &mut counts).await {
         return (counts.completed, counts.cancelled, 0);
     }
     let cancelled = counts.cancelled + u32::try_from(running.len()).unwrap_or(u32::MAX);
     let completed = counts.completed;
-    cancel.cancel();
+    d.cancel.cancel();
     // Tasks ending within the grace are already counted as cancelled.
-    if wait_all(running, ids, Instant::now() + grace, &mut Counts::default()).await {
+    if wait_all(
+        running,
+        ids,
+        Instant::now() + d.grace,
+        &mut Counts::default(),
+    )
+    .await
+    {
         return (completed, cancelled, 0);
     }
     let aborted = u32::try_from(running.len()).unwrap_or(u32::MAX);
+    // The aborted futures cannot report their outcome: report it for them
+    // (rule 2.3.14 p. 6) — no `await` until `abort_all`.
     for task_id in ids.values() {
         warn!(
             event = "task",
             action = "aborted",
             "task aborted after cancel grace: queue={}, task_id={}",
-            queue,
+            d.queue,
             task_id
         );
-        tasks.remove(task_id);
+        let attempt = d.tasks.status(task_id).map_or(0, |s| s.attempt());
+        let reason = FinishReason::CancelledByShutdown;
+        log_outcome(
+            d.queue,
+            task_id,
+            attempt,
+            TaskState::Cancelled,
+            Some(&reason),
+        );
+        d.observers.emit(&Event::Finished {
+            queue: d.queue,
+            task_id,
+            attempt,
+            state: TaskState::Cancelled,
+            reason: Some(&reason),
+        });
+        d.tasks.remove(task_id);
     }
     running.abort_all();
     while running.join_next().await.is_some() {}
     (completed, cancelled, aborted)
+}
+
+/// Joins tasks until none is left (`true`) or the shutdown signal (`false`).
+async fn wait_all_or_stop(
+    running: &mut JoinSet<TaskEnd>,
+    ids: &mut HashMap<tokio::task::Id, TaskId>,
+    stop: &CancellationToken,
+    counts: &mut Counts,
+) -> bool {
+    loop {
+        tokio::select! {
+            biased;
+            joined = running.join_next_with_id() => match joined {
+                Some(joined) => {
+                    ids.remove(&joined_id(&joined));
+                    counts.add(&joined);
+                }
+                None => return true,
+            },
+            () = stop.cancelled() => return false,
+        }
+    }
 }
 
 #[derive(Default)]
