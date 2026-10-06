@@ -1,5 +1,8 @@
 //! Standard tower layers on top of a handler, without adapters.
 
+// Test helpers may unwrap and panic (invariant 1.3.19 covers library code).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use std::sync::Arc;
 use std::time::Duration;
 

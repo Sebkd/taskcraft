@@ -40,6 +40,10 @@ pub fn catch_panic<F: Future>(future: F) -> CatchPanic<F> {
 impl<F: Future> Future for CatchPanic<F> {
     type Output = Result<F::Output, String>;
 
+    // Polling a finished future breaks the `Future` contract on the caller's
+    // side; panicking is the standard answer (`std::future::Ready` does the
+    // same). The one allowed panic of invariant 1.3.19.
+    #[allow(clippy::panic)]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         let Some(inner) = this.inner.as_mut() else {

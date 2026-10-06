@@ -33,6 +33,12 @@ unreachable_pub = "warn"
 # heavy generics are a known weakness of that design, so they stay visible.
 [workspace.lints.clippy]
 await_holding_lock = "warn"
+# Invariant 1.3.19: library code never panics by itself. Tests may, see
+# `.clippy.toml`.
+expect_used = "warn"
+panic = "warn"
+unreachable = "warn"
+unwrap_used = "warn"
 dbg_macro = "warn"
 empty_enums = "warn"
 enum_glob_use = "warn"

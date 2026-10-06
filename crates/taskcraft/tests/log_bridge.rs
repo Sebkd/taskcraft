@@ -1,6 +1,8 @@
 //! An application on `log`: with the `log` feature, library events arrive as
 //! `log` records while no tracing subscriber is set (change criterion 5).
 
+// Test helpers may unwrap and panic (invariant 1.3.19 covers library code).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![cfg(feature = "log")]
 
 use std::sync::{Arc, Mutex};

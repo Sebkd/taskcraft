@@ -1,6 +1,8 @@
 //! The `metrics` adapter and a consumer's own observer (rule 2.3.22, spec
 //! 4.4.2).
 
+// Test helpers may unwrap and panic (invariant 1.3.19 covers library code).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![cfg(feature = "metrics")]
 
 use std::collections::{BTreeMap, BTreeSet};

@@ -1,1 +1,5 @@
 msrv = "1.99"
+# Tests may unwrap and panic: a failed unwrap is a failed test.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

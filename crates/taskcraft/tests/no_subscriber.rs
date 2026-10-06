@@ -1,6 +1,9 @@
 //! Without a subscriber the library stays silent and installs none of its
 //! own (spec 2.9, change criterion 6).
 
+// Test helpers may unwrap and panic (invariant 1.3.19 covers library code).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use std::sync::Arc;
 
 use taskcraft::{CancellationToken, IdentityCodec, InMemorySource, Monitor, Queue, Task, task_fn};

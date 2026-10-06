@@ -162,8 +162,12 @@ fn encode_as<T: Serialize + 'static>(value: &dyn MetaValue) -> Result<Value, ser
     match value.as_any().downcast_ref::<T>() {
         Some(v) => serde_json::to_value(v),
         // The registry looks entries up by `TypeId::of::<T>()`, so a value of
-        // another type never reaches this function.
-        None => unreachable!("metadata value is not a {}", type_name::<T>()),
+        // another type never reaches this function; if one did, encoding
+        // fails instead of panicking (invariant 1.3.19).
+        None => Err(serde::ser::Error::custom(format!(
+            "metadata value is not a {}",
+            type_name::<T>()
+        ))),
     }
 }
 

@@ -1,6 +1,8 @@
 //! Runnables through the worker: a statecraft-fsm machine and a plain type
 //! (rule 2.3.21).
 
+// Test helpers may unwrap and panic (invariant 1.3.19 covers library code).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 // The `fsm` macro generates public types and needs `&mut self` handlers.
 #![allow(missing_docs, unreachable_pub, clippy::needless_pass_by_ref_mut)]
 

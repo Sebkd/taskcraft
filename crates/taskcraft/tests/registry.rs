@@ -1,6 +1,9 @@
 //! The task registry through the queue handle: push, status and cancel by
 //! id, on virtual time.
 
+// Test helpers may unwrap and panic (invariant 1.3.19 covers library code).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
