@@ -3,9 +3,9 @@
 //! Background task queue for Rust on the tokio runtime.
 //!
 //! **Work in progress.** This version contains the task model and the source
-//! contract, handlers, queues and workers. Retries, overflow policies, resource
-//! pools, status and cancellation by id follow in later versions; the first working release
-//! will be `0.1.0`.
+//! contract, handlers, queues and workers with retries, overflow policies and
+//! resource pools. Status and cancellation by id, recovery and the Kafka source
+//! follow in later versions; the first working release will be `0.1.0`.
 //!
 //! The target behaviour is specified in
 //! [`openspec/specs/taskcraft/taskcraft.md`](https://github.com/Sebkd/taskcraft/blob/master/openspec/specs/taskcraft/taskcraft.md).
@@ -50,6 +50,8 @@
 //!   empty poll: a fixed interval, growing pauses, a wake-up from the source,
 //!   or the first of several. [`Poller::wait`] ends the sleep at once on
 //!   shutdown or on a wake-up.
+//! - **Retry policy** ([`RetryPolicy`]) — how many attempts a task gets and
+//!   how long to pause between them; "defer" does not use attempts up.
 //! - **Queue** ([`Queue`]) — a source, a codec and a handler with their
 //!   settings. **Worker** — the intake loop of one queue: polls, hands tasks
 //!   over without waiting for them, restarts after source errors, drains on
@@ -72,6 +74,7 @@ mod offset;
 mod outcome;
 mod poll;
 mod queue;
+mod retry;
 mod source;
 mod state;
 mod status;
@@ -95,6 +98,7 @@ pub use offset::OffsetTracker;
 pub use outcome::{BoxError, ErrorKind, IntoOutcome, Outcome, ResultExt, TaskError};
 pub use poll::{PollStrategy, Poller, Wakeup};
 pub use queue::{DeadLetter, Queue, QueueBuilder};
+pub use retry::RetryPolicy;
 pub use source::{
     AckOverrideUnsupported, AckPointSupport, Capabilities, CloseReason, DeferError, Polled,
     PushError, PushResult, Source, WakeHandle, WakeSignal,

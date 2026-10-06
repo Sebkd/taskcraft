@@ -1,6 +1,6 @@
 # Спецификация на taskcraft
 
-Версия спецификации - 0.10 (проект: спецификация задаёт целевое поведение первой версии; что уже реализовано — в таблице «Статус реализации», раздел 1.1)
+Версия спецификации - 0.11 (проект: спецификация задаёт целевое поведение первой версии; что уже реализовано — в таблице «Статус реализации», раздел 1.1)
 
 <!-- TOC -->
 * [1. Общие сведения](#1-общие-сведения)
@@ -109,7 +109,7 @@ tower, всё остальное — слои. Кодовая база apalis н
 | `worker-loop-and-supervision` | 2.4.2, 2.3.12–2.3.14, 2.1.2.2–2.1.2.8, 2.1.2.11, 2.1.2.12, 2.1.2.16, 2.1.2.17, 2.7.6 | реализовано (2026-10-06) |
 | `interruptible-poll-strategies` | 2.3.24 | реализовано (2026-10-06) |
 | `overflow-policy-and-resource-pools` | 2.3.7, 2.3.8, 2.2.1, 2.2.2 | реализовано (2026-10-06) |
-| `retry-policy` | 2.3.3–2.3.6, 2.1.2.9, 2.1.2.10 | не реализовано |
+| `retry-policy` | 2.3.3–2.3.6, 2.1.2.9, 2.1.2.10 | реализовано (2026-10-06) |
 | `task-registry` | 2.3.11, 2.3.15, 2.1.2.1, 2.1.2.14, 2.1.2.15 | не реализовано |
 | `ownership-and-recovery` | 2.3.16, 2.3.18, 2.3.19 п. 3, 2.1.2.13, 2.2.8, 2.2.12 | не реализовано |
 | `kafka-source` | 2.6 «Источник Kafka», 2.8 «Источник Kafka», 2.12 | не реализовано |
@@ -1396,6 +1396,7 @@ stateDiagram-v2
 | ERROR | `recovery` | `failed` | Хук восстановления вернул ошибку | `recovery failed: queue={}, error="{}"` |
 | WARN | `source` | `closed` | Источник закрыт | `source closed: queue={}, reason="{}"` |
 | WARN | `task` | `retry` | Повтор попытки | `task will be retried: queue={}, task_id={}, attempt={}, pause={}, reason="{}"` |
+| WARN | `task` | `defer_failed` | Источник не принял «отложить»; задача ждёт в процессе (правило 2.3.6 п. 4) | `defer failed, handled in process: queue={}, task_id={}, error="{}"` |
 | WARN | `task` | `timed_out` | Таймаут попытки | `task attempt timed out: queue={}, task_id={}, attempt={}` |
 | WARN | `task` | `aborted` | Принудительное прерывание после льготного времени | `task aborted after cancel grace: queue={}, task_id={}` |
 | WARN | `task` | `rejected` | Отказ по переполнению | `task rejected: queue={}, task_id={}, reason=overflow` |

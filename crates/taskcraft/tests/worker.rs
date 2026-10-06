@@ -11,8 +11,8 @@ use taskcraft::testing::{
 };
 use taskcraft::{
     AckPoint, BoxFuture, CancellationToken, Capabilities, Monitor, Outcome, PollStrategy, Polled,
-    PushError, PushResult, QueueReport, ShutdownReport, Source, StopReason, Task, TaskError,
-    TaskId, TaskRequest, WakeSignal, task_fn,
+    PushError, PushResult, QueueReport, RetryPolicy, ShutdownReport, Source, StopReason, Task,
+    TaskError, TaskId, TaskRequest, WakeSignal, task_fn,
 };
 use taskcraft::{Queue, QueueBuilder};
 use tokio::task::JoinHandle;
@@ -494,6 +494,14 @@ impl Runner for WorkerRunner {
             async move { Ok::<_, std::convert::Infallible>(call.await) }
         });
         let queue = Queue::builder("scenario", setup.source, setup.codec, service)
+            .retry_policy(RetryPolicy {
+                max_attempts: setup.max_attempts,
+                base: setup.retry_pause,
+                factor: 1.0,
+                max: setup.retry_pause,
+                jitter: 0.0,
+                hold_slot: false,
+            })
             .build()
             .unwrap();
         let monitor = Monitor::new().register(queue).unwrap();
@@ -509,6 +517,9 @@ async fn harness_scenarios_pass_on_the_worker() {
         .await
         .unwrap();
     scenarios::boxed_abort_is_not_retried(&WorkerRunner)
+        .await
+        .unwrap();
+    scenarios::cancel_during_retry_pause_stops_work(&WorkerRunner)
         .await
         .unwrap();
     scenarios::poison_does_not_stop_worker(&WorkerRunner)

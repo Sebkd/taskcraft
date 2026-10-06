@@ -12,6 +12,7 @@ use crate::error::ConfigError;
 use crate::handler::SharedData;
 use crate::metadata::MetadataRegistry;
 use crate::poll::PollStrategy;
+use crate::retry::RetryPolicy;
 use crate::source::Source;
 use crate::task::{AckPoint, Task};
 
@@ -71,6 +72,7 @@ pub(crate) struct QueueConfig {
     pub(crate) ack_point: AckPoint,
     pub(crate) poll: PollStrategy,
     pub(crate) cancel_grace: Duration,
+    pub(crate) retry: RetryPolicy,
 }
 
 /// A queue: where tasks come from, how they are decoded, what runs them, and
@@ -107,6 +109,7 @@ impl<S: Source, C: Codec<Args, S::Message>, Svc, Args> Queue<S, C, Svc, Args> {
                     ack_point: AckPoint::OnAccept,
                     poll: PollStrategy::default(),
                     cancel_grace: Duration::from_secs(30),
+                    retry: RetryPolicy::default(),
                 },
                 source,
                 codec: Arc::new(codec),
@@ -194,6 +197,12 @@ impl<S: Source, C, Svc, Args> QueueBuilder<S, C, Svc, Args> {
         self
     }
 
+    /// How tasks answering "retry" are retried. Default: no retries.
+    pub fn retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.queue.config.retry = policy;
+        self
+    }
+
     /// How long a cancelled task may take to finish before it is aborted.
     /// Default 30 s.
     pub fn cancel_grace(mut self, grace: Duration) -> Self {
@@ -244,6 +253,7 @@ impl<S: Source, C, Svc, Args> QueueBuilder<S, C, Svc, Args> {
             return Err(ConfigError::InvalidConcurrency);
         }
         config.poll.validate()?;
+        config.retry.validate()?;
         if config.cancel_grace.is_zero() {
             return Err(ConfigError::InvalidDuration {
                 reason: "duration must be positive",
