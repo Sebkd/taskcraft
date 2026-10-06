@@ -182,6 +182,18 @@ impl<Args: Send + 'static> Source for InMemorySource<Args> {
         Ok(PushResult::Stored)
     }
 
+    async fn remove(&self, id: &TaskId) -> Result<bool, Infallible> {
+        let mut state = self.lock();
+        let before = state.ready.len() + state.deferred.len();
+        state.ready.retain(|task| task.id() != id);
+        state.deferred.retain(|_, task| task.id() != id);
+        let removed = state.ready.len() + state.deferred.len() < before;
+        if removed {
+            state.held.remove(id);
+        }
+        Ok(removed)
+    }
+
     async fn defer(
         &self,
         receipt: Delivery,
@@ -281,6 +293,29 @@ mod tests {
         source.ack(receipt).await.unwrap();
         assert!(matches!(source.poll().await.unwrap(), Polled::Closed(_)));
         assert!(source.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn remove_takes_out_ready_and_deferred_tasks_only() {
+        let source = InMemorySource::new(10);
+        let (a, b, c) = (TaskId::new("a"), TaskId::new("b"), TaskId::new("c"));
+        for id in ["a", "b", "c"] {
+            assert_eq!(push(&source, id).await, PushResult::Stored);
+        }
+        let (delivered, receipt) = take(&source).await;
+        assert_eq!(delivered.id(), &a);
+        assert!(!source.remove(&a).await.unwrap(), "handed out");
+
+        let (later, receipt_b) = take(&source).await;
+        let at = Instant::now() + Duration::from_secs(60);
+        source.defer(receipt_b, later, at).await.unwrap();
+        assert!(source.remove(&b).await.unwrap(), "deferred");
+        assert!(source.remove(&c).await.unwrap(), "ready");
+        assert!(!source.remove(&c).await.unwrap());
+        assert_eq!(push(&source, "c").await, PushResult::Stored, "id is free");
+
+        source.ack(receipt).await.unwrap();
+        assert_eq!(source.len(), 1);
     }
 
     #[tokio::test]

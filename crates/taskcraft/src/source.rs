@@ -289,6 +289,14 @@ pub trait Source: Send + Sync + 'static {
         async { Err(PushError::Unsupported) }
     }
 
+    /// Removes a task that is stored but not handed out yet — ready or
+    /// deferred — and frees its id. Returns `false` when the source holds no
+    /// such task or cannot remove tasks (the default).
+    fn remove(&self, id: &TaskId) -> impl Future<Output = Result<bool, Self::Error>> + Send {
+        let _ = id;
+        async { Ok(false) }
+    }
+
     /// Takes a delivered task back, to be handed out again at `at`. Only for
     /// sources that [support defer](Capabilities::supports_defer).
     fn defer(

@@ -1,6 +1,6 @@
 # Спецификация на taskcraft
 
-Версия спецификации - 0.11 (проект: спецификация задаёт целевое поведение первой версии; что уже реализовано — в таблице «Статус реализации», раздел 1.1)
+Версия спецификации - 0.12 (проект: спецификация задаёт целевое поведение первой версии; что уже реализовано — в таблице «Статус реализации», раздел 1.1)
 
 <!-- TOC -->
 * [1. Общие сведения](#1-общие-сведения)
@@ -110,7 +110,7 @@ tower, всё остальное — слои. Кодовая база apalis н
 | `interruptible-poll-strategies` | 2.3.24 | реализовано (2026-10-06) |
 | `overflow-policy-and-resource-pools` | 2.3.7, 2.3.8, 2.2.1, 2.2.2 | реализовано (2026-10-06) |
 | `retry-policy` | 2.3.3–2.3.6, 2.1.2.9, 2.1.2.10 | реализовано (2026-10-06) |
-| `task-registry` | 2.3.11, 2.3.15, 2.1.2.1, 2.1.2.14, 2.1.2.15 | не реализовано |
+| `task-registry` | 2.3.11, 2.3.15, 2.1.2.1, 2.1.2.14, 2.1.2.15 | реализовано (2026-10-06) |
 | `ownership-and-recovery` | 2.3.16, 2.3.18, 2.3.19 п. 3, 2.1.2.13, 2.2.8, 2.2.12 | не реализовано |
 | `kafka-source` | 2.6 «Источник Kafka», 2.8 «Источник Kafka», 2.12 | не реализовано |
 | `statecraft-integration` | 2.3.21 | не реализовано |
@@ -1404,6 +1404,7 @@ stateDiagram-v2
 | WARN | `lease` | `taken_over` | Задача подхвачена по истечении аренды | `task taken over after lease expiry: queue={}, task_id={}, previous_owner={}` |
 | WARN | `lease` | `lost` | Аренда потеряна, задача прекращена | `lease lost: queue={}, task_id={}` |
 | WARN | `observer` | `failed` | Ошибка наблюдателя | `observer failed: observer={}, error="{}"` |
+| WARN | `source` | `remove_failed` | Источник не смог убрать задачу при отмене; ответ «неизвестна» | `source could not remove task: queue={}, task_id={}, error="{}"` |
 | WARN | `source` | `key_missing` | Сообщение Kafka без ключа, идентификатор сгенерирован (один раз на очередь) | `message without key, task id generated: queue={}` |
 | INFO | `worker` | `started` / `resumed` | Приём начат / возобновлён | `worker started: queue={}` / `worker resumed: queue={}` |
 | INFO | `worker` | `stopped` | Воркер остановлен | `worker stopped: queue={}, reason="{}"` |

@@ -9,9 +9,11 @@ use std::time::Duration;
 
 use crate::codec::{Codec, CodecError};
 use crate::error::ConfigError;
+use crate::handle::QueueHandle;
 use crate::handler::SharedData;
 use crate::metadata::MetadataRegistry;
 use crate::poll::PollStrategy;
+use crate::registry::TaskRegistry;
 use crate::retry::RetryPolicy;
 use crate::source::Source;
 use crate::task::{AckPoint, Task};
@@ -87,6 +89,7 @@ pub struct Queue<S: Source, C, Svc, Args> {
     pub(crate) shared: Arc<SharedData>,
     pub(crate) dead_letter: Option<DeadLetterHook<S::Message>>,
     pub(crate) overflow: OverflowPolicy<Args>,
+    pub(crate) tasks: Arc<TaskRegistry>,
     pub(crate) _args: PhantomData<fn() -> Args>,
 }
 
@@ -118,6 +121,7 @@ impl<S: Source, C: Codec<Args, S::Message>, Svc, Args> Queue<S, C, Svc, Args> {
                 shared: Arc::new(SharedData::new()),
                 dead_letter: None,
                 overflow: OverflowPolicy::Wait { limit: None },
+                tasks: Arc::new(TaskRegistry::new()),
                 _args: PhantomData,
             },
         }
@@ -129,6 +133,18 @@ impl<S: Source, C, Svc, Args> Queue<S, C, Svc, Args> {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.config.name
+    }
+
+    /// A handle for pushing tasks and asking about them by id. Take it before
+    /// registering the queue with a monitor.
+    #[must_use]
+    pub fn handle(&self) -> QueueHandle<S, C, Args> {
+        QueueHandle::new(
+            &self.config.name,
+            Arc::clone(&self.source),
+            Arc::clone(&self.codec),
+            Arc::clone(&self.tasks),
+        )
     }
 }
 

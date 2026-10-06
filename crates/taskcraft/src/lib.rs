@@ -4,8 +4,9 @@
 //!
 //! **Work in progress.** This version contains the task model and the source
 //! contract, handlers, queues and workers with retries, overflow policies and
-//! resource pools. Status and cancellation by id, recovery and the Kafka source
-//! follow in later versions; the first working release will be `0.1.0`.
+//! resource pools, push, status and cancellation by id. Recovery and the
+//! Kafka source follow in later versions; the first working release will be
+//! `0.1.0`.
 //!
 //! The target behaviour is specified in
 //! [`openspec/specs/taskcraft/taskcraft.md`](https://github.com/Sebkd/taskcraft/blob/master/openspec/specs/taskcraft/taskcraft.md).
@@ -39,7 +40,7 @@
 //! - **Handler** — a plain `async fn(Args, X1, …, Xn)` turned into a tower
 //!   service by [`task_fn`]. The extra parameters are **extractable values**
 //!   ([`FromTask`]): [`Meta<T>`](Meta), [`Attempt`], [`TaskId`],
-//!   [`Data<T>`](Data). Missing required metadata aborts the attempt before
+//!   [`Data<T>`](Data), [`Cancel`]. Missing required metadata aborts the attempt before
 //!   the handler runs.
 //! - **Outcome** ([`Outcome`]) — success, retry, abort, defer or panic. The
 //!   classification is data: `?` on any error gives a retry, and
@@ -57,6 +58,13 @@
 //!   over without waiting for them, restarts after source errors, drains on
 //!   shutdown. **Monitor** ([`Monitor`]) — owns the workers and returns a
 //!   [`ShutdownReport`].
+//! - **Queue handle** ([`QueueHandle`]) — pushes tasks into a queue and asks
+//!   about them by id: status ([`TaskStatus`]) and cancel
+//!   ([`CancelOutcome`]). **Task registry** — the queue's live tasks, from
+//!   accept to their final state: a busy id is never run twice, and finished
+//!   tasks take no memory.
+//! - **Cancel flag** ([`Cancel`]) — set by a cancel request or by shutdown; a
+//!   running handler stops on it or is aborted after the cancel grace.
 //! - **Test harness** (`taskcraft::testing`, feature `test-util`) — a source
 //!   with scripted failures, a delivery ledger and reusable worker scenarios.
 //! - **Log partition, offset** — a log source's ordered sequence of messages
@@ -66,6 +74,7 @@
 mod attempt;
 mod codec;
 mod error;
+mod handle;
 mod handler;
 mod memory;
 mod metadata;
@@ -74,6 +83,7 @@ mod offset;
 mod outcome;
 mod poll;
 mod queue;
+mod registry;
 mod retry;
 mod source;
 mod state;
@@ -87,9 +97,10 @@ pub use attempt::{CatchPanic, catch_panic, outcome_of, run_attempt};
 pub use codec::{Codec, CodecError, IdentityCodec, JsonCodec};
 
 pub use error::{ConfigError, InvalidTransition, MetadataError};
+pub use handle::{CancelOutcome, PushTaskError, QueueHandle};
 pub use handler::{
-    Attempt, BoxFuture, Data, FromTask, Handler, Meta, Rejection, SharedData, TaskFn, TaskRequest,
-    task_fn,
+    Attempt, BoxFuture, Cancel, Data, FromTask, Handler, Meta, Rejection, SharedData, TaskFn,
+    TaskRequest, task_fn,
 };
 pub use memory::{Delivery, InMemorySource};
 pub use metadata::{Metadata, MetadataRegistry, TRACE_PARENT};
