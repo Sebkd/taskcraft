@@ -16,7 +16,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::MetadataError;
 use crate::metadata::MetadataRegistry;
-use crate::outcome::{IntoOutcome, Outcome};
+use crate::outcome::Outcome;
+use crate::runnable::HandlerOutput;
 use crate::status::FinishReason;
 use crate::task::{Task, TaskId};
 
@@ -294,7 +295,8 @@ impl<Args, T: Send + Sync + 'static> FromTask<Args> for Data<T> {
 }
 
 /// A function usable as a handler: `async fn(Args, X1, …, Xn) -> R` with up
-/// to eight [`FromTask`] parameters and `R:` [`IntoOutcome`].
+/// to eight [`FromTask`] parameters and `R:` [`HandlerOutput`] — an outcome
+/// or a [`Run`](crate::Run) of a process.
 ///
 /// ```compile_fail
 /// // A handler must return (), Outcome or Result<_, TaskError>.
@@ -312,7 +314,7 @@ impl<Args, T: Send + Sync + 'static> FromTask<Args> for Data<T> {
     label = "not a handler function",
     note = "a handler is `async fn(Args, X1, …, Xn) -> R` with at most 8 extra parameters",
     note = "every extra parameter must implement `FromTask`: Meta<T>, Option<Meta<T>>, Attempt, TaskId, Data<T>, Cancel",
-    note = "`R` must be (), Outcome, Result<(), TaskError> or Result<Outcome, TaskError>",
+    note = "`R` must be (), Outcome, Result<(), TaskError>, Result<Outcome, TaskError>, Run<R> or Result<Run<R>, TaskError>",
     note = "the function must be Clone + Send + Sync + 'static and its future Send"
 )]
 pub trait Handler<Args, X>: Clone + Send + Sync + 'static {
@@ -327,7 +329,7 @@ macro_rules! impl_handler {
         where
             F: Fn(Args, $($x,)*) -> Fut + Clone + Send + Sync + 'static,
             Fut: Future<Output = R> + Send + 'static,
-            R: IntoOutcome,
+            R: HandlerOutput,
             Args: Send + 'static,
             $($x: FromTask<Args> + Send + 'static,)*
         {
@@ -339,9 +341,10 @@ macro_rules! impl_handler {
                         Err(rejection) => return Box::pin(ready(Outcome::from(rejection))),
                     };
                 )*
+                let stop = request.cancel_token().clone();
                 let args = request.into_task().into_args();
                 let future = self(args, $($x,)*);
-                Box::pin(async move { future.await.into_outcome() })
+                Box::pin(async move { future.await.finish(stop).await })
             }
         }
     };
