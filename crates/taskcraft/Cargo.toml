@@ -16,8 +16,14 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time"] }
+tokio-util = { workspace = true }
 tower = { workspace = true }
 uuid = { workspace = true }
+
+[features]
+# Test harness: a fault-injecting source, a delivery ledger and reusable
+# scenarios for workers (`taskcraft::testing`).
+test-util = ["tokio/rt"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

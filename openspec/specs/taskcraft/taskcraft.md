@@ -1,6 +1,6 @@
 # Спецификация на taskcraft
 
-Версия спецификации - 0.5 (проект: спецификация задаёт целевое поведение первой версии; что уже реализовано — в таблице «Статус реализации», раздел 1.1)
+Версия спецификации - 0.7 (проект: спецификация задаёт целевое поведение первой версии; что уже реализовано — в таблице «Статус реализации», раздел 1.1)
 
 <!-- TOC -->
 * [1. Общие сведения](#1-общие-сведения)
@@ -105,7 +105,7 @@ tower, всё остальное — слои. Кодовая база apalis н
 | `task-model-and-lifecycle` | 1.2, 2.4.1, 2.7.1–2.7.4, 2.3.17, 2.11.4 | реализовано (2026-10-06) |
 | `source-contract` | 2.3.1, 2.3.9, 2.3.10, 2.5 «Источник», 2.6 «In-memory источник» | реализовано (2026-10-06) |
 | `handler-error-classification` | 2.3.2, 2.5 «Обработчик», 2.2.11 | реализовано (2026-10-06) |
-| `test-harness` | 4.3 п. 8, 4.2 | не реализовано |
+| `test-harness` | 4.3 п. 8, 4.2 | реализовано (2026-10-06) |
 | `worker-loop-and-supervision` | 2.4.2, 2.3.12–2.3.14, 2.1.2.2–2.1.2.8, 2.1.2.11, 2.1.2.12, 2.1.2.16, 2.1.2.17, 2.7.6 | не реализовано |
 | `interruptible-poll-strategies` | 2.3.24 | не реализовано |
 | `overflow-policy-and-resource-pools` | 2.3.7, 2.3.8, 2.2.1, 2.2.2 | не реализовано |
@@ -1344,9 +1344,30 @@ stateDiagram-v2
 
 ### 2.9. Логирование
 
-Журналирование через tracing. Каждая запись о задаче несёт поля: имя
-очереди, идентификатор задачи, номер попытки. Значения аргументов и
-метаданных в журнал не пишутся (инвариант 1.3.18).
+Журналирование через tracing. Формат записи совпадает с соглашением первого
+потребителя: журнал читают в системе поиска по логам, которая сама
+раскладывает аргументы из текста сообщения на приёме.
+
+**Формат записи.**
+
+1. В записи **ровно три поля**: `event`, `action`, `message`. Других полей у
+   записи нет.
+2. `event` — домен, литерал из закрытого словаря библиотеки: `task`,
+   `worker`, `source`, `shutdown`, `recovery`, `lease`, `observer`. Новый
+   домен — правка этого раздела, а не строка в коде.
+3. `action` — операция внутри домена, литерал в `snake_case` (таблица ниже).
+   Подстановка значения времени выполнения в `event` или `action` запрещена:
+   поля нужны для фильтра и агрегации.
+4. `message` — фраза на английском, затем аргументы парами `ключ=значение`
+   через запятую. Сообщение обязательно и непусто; вырожденный текст
+   (`"{}"`) запрещён.
+5. Значения — через `Display`; `Debug` только там, где `Display` нет.
+   Значение с пробелами или запятыми — в двойных кавычках.
+6. Ключ в записи уникален; одно значение — одна подстановка. Стандартные
+   ключи: `queue`, `task_id`, `attempt`, `reason`, `error`.
+7. Значения аргументов и метаданных задачи в журнал не пишутся
+   (инвариант 1.3.18): только идентификатор задачи, имя очереди и имена
+   типов.
 
 **Как приложение видит журнал.**
 
@@ -1365,29 +1386,30 @@ stateDiagram-v2
 5. Без подписчика и без возможности `log` события отбрасываются ценой одной
    проверки уровня: журнал не влияет на работу очереди.
 
-| Уровень | Событие | Формат сообщения |
-|---------|---------|------------------|
-| ERROR | Задача завершилась паникой | "task panicked: queue={}, id={}, attempt={}, message={}" |
-| ERROR | Задача завершилась ошибкой | "task failed: queue={}, id={}, attempt={}, reason={}" |
-| ERROR | Отравленное сообщение (действие по умолчанию) | "message dropped: queue={}, reason={}" |
-| ERROR | Ошибка источника, перезапуск цикла приёма | "source error: queue={}, error={}, restart_in={}" |
-| ERROR | Хук восстановления вернул ошибку | "recovery failed: queue={}, error={}" |
-| WARN | Источник закрыт | "source closed: queue={}, reason={}" |
-| WARN | Повтор попытки | "task retry: queue={}, id={}, attempt={}, pause={}, reason={}" |
-| WARN | Таймаут попытки | "task timed out: queue={}, id={}, attempt={}" |
-| WARN | Принудительное прерывание после льготного времени | "task aborted: queue={}, id={}" |
-| WARN | Отказ по переполнению | "task rejected: queue={}, id={}, reason=overflow" |
-| WARN | Задача подхвачена по истечении аренды | "task taken over: queue={}, id={}, previous_owner={}" |
-| WARN | Ошибка наблюдателя | "observer failed: observer={}, error={}" |
-| WARN | Аренда потеряна, задача прекращена | "lease lost: queue={}, id={}" |
-| WARN | Сообщение Kafka без ключа, идентификатор сгенерирован (один раз на очередь) | "message without key: queue={}, id generated" |
-| INFO | Приём начат / возобновлён | "worker started: queue={}" / "worker resumed: queue={}" |
-| INFO | Восстановлено задач при старте | "recovered: queue={}, count={}" |
-| INFO | Остановка начата / завершена | "shutdown started" / "shutdown finished: completed={}, cancelled={}, aborted={}" |
-| INFO | Отмена задачи запрошена | "cancel requested: queue={}, id={}" |
-| DEBUG | Задача принята, старт и исход попытки | "task accepted/started/finished: queue={}, id={}, attempt={}, outcome={}" |
-| DEBUG | Дубль по идентификатору | "duplicate: queue={}, id={}" |
-| DEBUG | Отложенный повтор выполнен в процессе | "defer degraded to retry: queue={}, id={}" |
+| Уровень | `event` | `action` | Когда | Сообщение |
+|---------|---------|----------|-------|-----------|
+| ERROR | `task` | `panicked` | Задача завершилась паникой | `task panicked: queue={}, task_id={}, attempt={}, message="{}"` |
+| ERROR | `task` | `failed` | Задача завершилась ошибкой | `task failed: queue={}, task_id={}, attempt={}, reason="{}"` |
+| ERROR | `source` | `message_dropped` | Отравленное сообщение (действие по умолчанию) | `message dropped: queue={}, reason="{}"` |
+| ERROR | `source` | `failed` | Ошибка источника, перезапуск цикла приёма | `source failed: queue={}, error="{}", restart_in={}` |
+| ERROR | `recovery` | `failed` | Хук восстановления вернул ошибку | `recovery failed: queue={}, error="{}"` |
+| WARN | `source` | `closed` | Источник закрыт | `source closed: queue={}, reason="{}"` |
+| WARN | `task` | `retry` | Повтор попытки | `task will be retried: queue={}, task_id={}, attempt={}, pause={}, reason="{}"` |
+| WARN | `task` | `timed_out` | Таймаут попытки | `task attempt timed out: queue={}, task_id={}, attempt={}` |
+| WARN | `task` | `aborted` | Принудительное прерывание после льготного времени | `task aborted after cancel grace: queue={}, task_id={}` |
+| WARN | `task` | `rejected` | Отказ по переполнению | `task rejected: queue={}, task_id={}, reason=overflow` |
+| WARN | `lease` | `taken_over` | Задача подхвачена по истечении аренды | `task taken over after lease expiry: queue={}, task_id={}, previous_owner={}` |
+| WARN | `lease` | `lost` | Аренда потеряна, задача прекращена | `lease lost: queue={}, task_id={}` |
+| WARN | `observer` | `failed` | Ошибка наблюдателя | `observer failed: observer={}, error="{}"` |
+| WARN | `source` | `key_missing` | Сообщение Kafka без ключа, идентификатор сгенерирован (один раз на очередь) | `message without key, task id generated: queue={}` |
+| INFO | `worker` | `started` / `resumed` | Приём начат / возобновлён | `worker started: queue={}` / `worker resumed: queue={}` |
+| INFO | `worker` | `stopped` | Воркер остановлен | `worker stopped: queue={}, reason="{}"` |
+| INFO | `recovery` | `recovered` | Восстановлено задач при старте | `tasks recovered: queue={}, count={}` |
+| INFO | `shutdown` | `started` / `finished` | Остановка начата / завершена | `shutdown started` / `shutdown finished: completed={}, cancelled={}, aborted={}` |
+| INFO | `task` | `cancel_requested` | Отмена задачи запрошена | `task cancel requested: queue={}, task_id={}` |
+| DEBUG | `task` | `accepted` / `started` / `finished` | Задача принята, старт и исход попытки | `task accepted: queue={}, task_id={}` / `task started: queue={}, task_id={}, attempt={}` / `task finished: queue={}, task_id={}, attempt={}, outcome={}` |
+| DEBUG | `task` | `duplicate` | Дубль по идентификатору | `duplicate task: queue={}, task_id={}` |
+| DEBUG | `task` | `defer_in_process` | Отложенный повтор выполнен в процессе | `defer handled in process: queue={}, task_id={}` |
 
 ### 2.10. Валидация входящих значений
 
@@ -1518,6 +1540,7 @@ stateDiagram-v2
 | 45 | Аренда; процесс A теряет аренду задачи в состоянии «Принята» | Задача у A «Отменена» с причиной «аренда потеряна», ack и запись статуса не выполнены; журнал WARN (правило 2.3.20 п. 5, переход 2.4.1.3) |
 | 46 | Таймаут попытки, исход таймаута «прервать», обработчик после признака отмены возвращает «повторить» | Итог «Ошибка» с причиной «таймаут попытки», повтора нет (правило 2.3.15 п. 4) |
 | 47 | Постановка в in-memory источник до заполнения ёмкости и сверх неё | Сверх ёмкости — «отказ: источник заполнен», задача не записана (2.6) |
+| 48 | Любая запись журнала библиотеки, подписчик JSON на уровне INFO | В записи есть `event` и `action` из словаря 2.9 и непустое `message` с аргументами `ключ=значение`; других полей и полей спанов нет (2.9, 4.4.1) |
 
 ---
 
@@ -1588,6 +1611,11 @@ stateDiagram-v2
 Каждая попытка исполняется в спане tracing с полями: очередь,
 идентификатор, номер попытки. Если у задачи есть метаданные `trace_parent`,
 спан попытки связан с ним.
+
+Спаны библиотеки — уровня **DEBUG**. Подписчик в формате JSON по умолчанию
+дописывает в каждую запись поля текущих спанов; при уровне INFO спанов нет,
+и записи остаются ровно с тремя полями (2.9). Для трассировки спаны
+включаются фильтром `taskcraft=debug`.
 
 #### 4.4.2. Стандартные метрики
 
