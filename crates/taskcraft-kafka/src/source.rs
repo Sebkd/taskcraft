@@ -9,12 +9,14 @@ use std::time::Duration;
 use rdkafka::consumer::{
     BaseConsumer, CommitMode, Consumer, ConsumerContext, Rebalance, StreamConsumer,
 };
-use rdkafka::error::{KafkaError, RDKafkaErrorCode};
+use rdkafka::error::{KafkaError, KafkaResult, RDKafkaErrorCode};
 use rdkafka::message::{Headers, Message};
 use rdkafka::{ClientConfig, ClientContext, Offset, TopicPartitionList};
 use taskcraft::{
-    AckPointSupport, Capabilities, ConfigError, Polled, Source, TaskId, WakeHandle, WakeSignal,
+    AckPointSupport, Capabilities, ConfigError, Notice, Notices, Polled, Source, TaskId,
+    WakeHandle, WakeSignal,
 };
+use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::commits::{Commits, KafkaReceipt};
@@ -54,11 +56,12 @@ fn lock<T>(shared: &Mutex<T>) -> MutexGuard<'_, T> {
     shared.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Client callbacks: rebalances and errors.
+/// Client callbacks: rebalances, errors and commit results.
 struct Callbacks {
     topic: String,
     commits: Shared<Commits>,
     failure: Shared<Option<String>>,
+    notify: mpsc::UnboundedSender<Notice>,
 }
 
 impl ClientContext for Callbacks {
@@ -87,6 +90,31 @@ impl ConsumerContext for Callbacks {
         if let Rebalance::Revoke(partitions) = rebalance {
             lock(&self.commits).revoke(partitions.elements().iter().map(|e| e.partition()));
         }
+    }
+
+    fn commit_callback(&self, result: KafkaResult<()>, offsets: &TopicPartitionList) {
+        let Err(error) = result else {
+            return;
+        };
+        for element in offsets.elements() {
+            let Offset::Offset(next) = element.offset() else {
+                continue;
+            };
+            warn!(
+                event = "source",
+                action = "commit_failed",
+                "offset commit failed: topic={}, partition={}, offset={}, error={:?}",
+                self.topic,
+                element.partition(),
+                next,
+                error.to_string()
+            );
+            lock(&self.commits).commit_failed(element.partition(), next);
+        }
+        // Counted as a source error by the worker (change kafka-commit-errors).
+        let _ = self.notify.send(Notice::SourceError(format!(
+            "offset commit failed: {error}"
+        )));
     }
 }
 
@@ -161,10 +189,12 @@ impl KafkaSourceBuilder {
         }
         let commits = Shared::default();
         let failure = Shared::default();
+        let (notify, notices) = Notices::channel();
         let callbacks = Callbacks {
             topic: self.topic.clone(),
             commits: Arc::clone(&commits),
             failure: Arc::clone(&failure),
+            notify,
         };
         let consumer: StreamConsumer<Callbacks> =
             self.client_config().create_with_context(callbacks)?;
@@ -175,6 +205,7 @@ impl KafkaSourceBuilder {
             group: self.group,
             commits,
             failure,
+            notices: Mutex::new(Some(notices)),
             task_id: self.task_id,
             warned: AtomicBool::new(false),
             wake: WakeHandle::new(),
@@ -214,6 +245,7 @@ pub struct KafkaSource {
     group: String,
     commits: Shared<Commits>,
     failure: Shared<Option<String>>,
+    notices: Mutex<Option<Notices>>,
     task_id: TaskIdFn,
     warned: AtomicBool,
     wake: WakeHandle,
@@ -323,6 +355,10 @@ impl Source for KafkaSource {
     fn subscribe(&self) -> Option<WakeSignal> {
         Some(self.wake.subscribe())
     }
+
+    fn notices(&self) -> Option<Notices> {
+        lock(&self.notices).take()
+    }
 }
 
 #[cfg(test)]
@@ -343,6 +379,54 @@ mod tests {
         assert_eq!(config.get("auto.offset.reset"), Some("latest"));
         assert_eq!(config.get("client.id"), Some("worker-1"));
         assert_eq!(config.get("group.id"), Some("workers"));
+    }
+
+    fn callbacks() -> (Callbacks, Notices) {
+        let (notify, notices) = Notices::channel();
+        let callbacks = Callbacks {
+            topic: "jobs".to_owned(),
+            commits: Shared::default(),
+            failure: Shared::default(),
+            notify,
+        };
+        (callbacks, notices)
+    }
+
+    fn offsets(partition: i32, next: i64) -> TopicPartitionList {
+        let mut list = TopicPartitionList::new();
+        list.add_partition_offset("jobs", partition, Offset::Offset(next))
+            .unwrap();
+        list
+    }
+
+    /// Change criteria 1 and 2: a failed commit is a source error, and the
+    /// boundary goes out again on the next ack.
+    #[tokio::test]
+    async fn failed_commit_is_reported_and_retried() {
+        let (callbacks, mut notices) = callbacks();
+        let (first, second) = {
+            let mut commits = lock(&callbacks.commits);
+            (commits.delivered(0, 1), commits.delivered(0, 2))
+        };
+        assert_eq!(lock(&callbacks.commits).acked(first), Some(2));
+
+        let failed = KafkaError::ConsumerCommit(RDKafkaErrorCode::RequestTimedOut);
+        callbacks.commit_callback(Err(failed), &offsets(0, 2));
+        let notice = notices.recv().await.unwrap();
+        assert!(
+            matches!(&notice, Notice::SourceError(text) if text.contains("offset commit failed")),
+            "{notice:?}"
+        );
+        assert_eq!(lock(&callbacks.commits).acked(second), Some(3));
+    }
+
+    /// Change criterion 3: a successful commit changes nothing.
+    #[tokio::test]
+    async fn successful_commit_is_silent() {
+        let (callbacks, mut notices) = callbacks();
+        callbacks.commit_callback(Ok(()), &offsets(0, 2));
+        drop(callbacks);
+        assert!(notices.recv().await.is_none(), "no notice");
     }
 
     #[test]

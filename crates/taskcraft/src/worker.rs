@@ -1063,6 +1063,9 @@ async fn listen(
                     });
                 }
             }
+            Notice::SourceError(_) => {
+                observers.emit(&Event::SourceFailed { queue: &queue });
+            }
             Notice::TakenOver {
                 task_id,
                 previous_owner,
