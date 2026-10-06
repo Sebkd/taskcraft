@@ -2,8 +2,9 @@
 
 #![allow(dead_code, unreachable_pub)]
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 
 use tracing::field::{Field, Visit};
 use tracing_subscriber::Layer;
@@ -37,12 +38,44 @@ impl Captured {
             .count()
     }
 
-    /// Installs the capture for the current thread; tokio tests run on one.
-    pub fn install(&self) -> tracing::subscriber::DefaultGuard {
-        let subscriber = tracing_subscriber::registry().with(self.clone());
-        tracing::subscriber::set_default(subscriber)
+    /// Captures events of the current thread until the guard drops; tokio
+    /// tests run on one.
+    ///
+    /// One global subscriber routes events to the capture of their thread.
+    /// A per-thread default subscriber would race with tests running in
+    /// parallel without one: a callsite first hit there may cache "no
+    /// interest" and the capturing test would miss its events.
+    pub fn install(&self) -> Installed {
+        static GLOBAL: Once = Once::new();
+        GLOBAL.call_once(|| {
+            tracing::subscriber::set_global_default(tracing_subscriber::registry().with(Router))
+                .expect("no other global subscriber in tests");
+            tracing::callsite::rebuild_interest_cache();
+        });
+        Installed(CURRENT.with(|current| current.replace(Some(self.clone()))))
+    }
+
+    fn push(&self, record: Record) {
+        self.0.lock().unwrap().push(record);
     }
 }
+
+thread_local! {
+    static CURRENT: RefCell<Option<Captured>> = const { RefCell::new(None) };
+}
+
+/// Restores the earlier capture of the thread on drop.
+pub struct Installed(Option<Captured>);
+
+impl Drop for Installed {
+    fn drop(&mut self) {
+        let earlier = self.0.take();
+        CURRENT.with(|current| *current.borrow_mut() = earlier);
+    }
+}
+
+/// Sends every event to the capture of its thread, if any.
+struct Router;
 
 struct Fields<'a>(&'a mut BTreeMap<String, String>);
 
@@ -56,11 +89,14 @@ impl Visit for Fields<'_> {
     }
 }
 
-impl<S: tracing::Subscriber> Layer<S> for Captured {
+impl<S: tracing::Subscriber> Layer<S> for Router {
     fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+        let Some(capture) = CURRENT.with(|current| current.borrow().clone()) else {
+            return;
+        };
         let mut fields = BTreeMap::new();
         event.record(&mut Fields(&mut fields));
-        self.0.lock().unwrap().push(Record {
+        capture.push(Record {
             level: *event.metadata().level(),
             fields,
         });
