@@ -82,6 +82,17 @@ impl Commits {
         Some(point + 1)
     }
 
+    /// A commit up to `next` (the next offset to read) failed: unless a later
+    /// commit already went out, the partition commits its boundary again on
+    /// its next ack.
+    pub(crate) fn commit_failed(&mut self, partition: i32, next: i64) {
+        if let Some(entry) = self.partitions.get_mut(&partition)
+            && entry.committed == Some(next - 1)
+        {
+            entry.committed = None;
+        }
+    }
+
     /// Forgets revoked partitions: their deliveries in flight no longer
     /// commit anything; another consumer of the group gets them again.
     pub(crate) fn revoke(&mut self, partitions: impl IntoIterator<Item = i32>) {
@@ -116,6 +127,23 @@ mod tests {
         assert_eq!(commits.acked(b), Some(21));
         assert_eq!(commits.acked(a2), None);
         assert_eq!(commits.acked(a), Some(12));
+    }
+
+    /// Change criterion 2: a failed commit goes out again on the next ack.
+    #[test]
+    fn failed_commit_is_sent_again() {
+        let mut commits = Commits::default();
+        let first = commits.delivered(0, 1);
+        let second = commits.delivered(0, 2);
+        assert_eq!(commits.acked(first), Some(2));
+        commits.commit_failed(0, 2);
+        assert_eq!(commits.acked(second), Some(3), "boundary sent again");
+
+        // An older failure does not undo a newer commit.
+        commits.commit_failed(0, 2);
+        let third = commits.delivered(0, 3);
+        assert_eq!(commits.acked(third), Some(4));
+        commits.commit_failed(7, 1); // unknown partition: nothing happens
     }
 
     #[test]

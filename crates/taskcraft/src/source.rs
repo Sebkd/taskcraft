@@ -225,6 +225,10 @@ pub enum Notice {
         /// Its previous owner.
         previous_owner: String,
     },
+    /// A background operation of the source failed, such as an offset
+    /// commit. The source logs the details; the worker counts it as a
+    /// source error and does not restart its intake.
+    SourceError(String),
 }
 
 /// The receiving end of a source's notices; one worker takes it.
