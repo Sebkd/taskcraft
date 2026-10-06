@@ -26,6 +26,24 @@ pub enum ConfigError {
         /// The reserved name.
         name: String,
     },
+    /// A queue without a name.
+    #[error("queue name must not be empty")]
+    EmptyQueueName,
+    /// Two queues of one monitor share a name.
+    #[error("duplicate queue name: {name}")]
+    DuplicateQueueName {
+        /// The repeated name.
+        name: String,
+    },
+    /// A concurrency limit below 1.
+    #[error("concurrency must be at least 1")]
+    InvalidConcurrency,
+    /// A duration out of range.
+    #[error("invalid duration: {reason}")]
+    InvalidDuration {
+        /// What is wrong, worded as in the configuration rules.
+        reason: &'static str,
+    },
     /// A poll strategy with a zero duration, a minimum above its maximum or
     /// an empty composition.
     #[error("invalid poll strategy: {reason}")]

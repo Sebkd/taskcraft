@@ -256,7 +256,6 @@ impl<Args> Task<Args> {
     }
 
     /// Starts a new attempt: the attempt number grows by one.
-    #[allow(dead_code)] // used by the worker in a later change
     pub(crate) fn begin_attempt(&mut self) {
         self.attempt = self.attempt.saturating_add(1);
     }
@@ -268,7 +267,6 @@ impl<Args> Task<Args> {
     }
 
     /// Records the moment of accept (transition 2.4.1.1).
-    #[allow(dead_code)] // used by the worker in a later change
     pub(crate) fn mark_accepted(&mut self, at: SystemTime) {
         self.accepted_at = Some(at);
     }

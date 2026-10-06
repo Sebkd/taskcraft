@@ -1,0 +1,506 @@
+//! The worker of one queue: intake loop, supervision, execution and drain
+//! (spec 2.4.2, 2.3.12–2.3.14).
+
+use std::collections::HashMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::task::JoinSet;
+use tokio::time::{Instant, sleep};
+use tokio_util::sync::CancellationToken;
+use tracing::{Instrument, debug, debug_span, error, info, warn};
+
+use crate::attempt::run_attempt;
+use crate::codec::Codec;
+use crate::handler::{SharedData, TaskRequest};
+use crate::metadata::MetadataRegistry;
+use crate::monitor::{QueueReport, StopReason, WorkerContext};
+use crate::outcome::{BoxError, Outcome};
+use crate::poll::{Poller, Wakeup};
+use crate::queue::{DeadLetter, Queue};
+use crate::source::{Polled, Source};
+use crate::state::{Lifecycle, TaskState};
+use crate::status::FinishReason;
+use crate::task::{AckPoint, Task, TaskId};
+
+/// What every execution of a queue shares.
+struct ExecCtx<S: Source, C> {
+    queue: Arc<str>,
+    source: Arc<S>,
+    codec: Arc<C>,
+    registry: Arc<MetadataRegistry>,
+    shared: Arc<SharedData>,
+    supports_defer: bool,
+    ack_errors: mpsc::UnboundedSender<String>,
+}
+
+/// Sleeps the restart delay unless stopped; returns `true` when stopped.
+async fn restart_pause(ctx: &WorkerContext, delay: Duration) -> bool {
+    tokio::select! {
+        biased;
+        () = ctx.stop.cancelled() => true,
+        () = sleep(delay) => false,
+    }
+}
+
+/// Logs a source failure and waits out the restart delay (transitions
+/// 2.4.2.5 / 2.4.2.12 and 2.4.2.9). Returns `true` when stopped meanwhile.
+async fn restart(ctx: &WorkerContext, queue: &str, failures: u32, error: &str) -> bool {
+    let delay = ctx.restart.delay(failures);
+    error!(
+        event = "source",
+        action = "failed",
+        "source failed: queue={}, error={:?}, restart_in={:?}",
+        queue,
+        error,
+        delay
+    );
+    if restart_pause(ctx, delay).await {
+        return true;
+    }
+    info!(
+        event = "worker",
+        action = "resumed",
+        "worker resumed: queue={}",
+        queue
+    );
+    false
+}
+
+pub(crate) async fn run_worker<S, C, Svc, Args>(
+    queue: Queue<S, C, Svc, Args>,
+    ctx: WorkerContext,
+) -> QueueReport
+where
+    S: Source,
+    C: Codec<Args, S::Message>,
+    Svc: tower::Service<TaskRequest<Args>, Response = Outcome> + Clone + Send + 'static,
+    Svc::Error: Into<BoxError>,
+    Svc::Future: Send,
+    Args: Clone + Send + 'static,
+{
+    let Queue {
+        config,
+        source,
+        codec,
+        service,
+        registry,
+        shared,
+        dead_letter,
+        ..
+    } = queue;
+    let name: Arc<str> = config.name.into();
+    info!(
+        event = "worker",
+        action = "started",
+        "worker started: queue={}",
+        name
+    );
+
+    let (ack_errors, mut ack_failures) = mpsc::unbounded_channel();
+    let exec = Arc::new(ExecCtx {
+        queue: Arc::clone(&name),
+        source: Arc::clone(&source),
+        codec: Arc::clone(&codec),
+        registry,
+        shared,
+        supports_defer: source.capabilities().supports_defer(),
+        ack_errors: ack_errors.clone(),
+    });
+    let slots = Arc::new(Semaphore::new(config.concurrency));
+    let mut running = JoinSet::new();
+    let mut ids: HashMap<tokio::task::Id, TaskId> = HashMap::new();
+    let drain_cancel = CancellationToken::new();
+    let mut poller = Poller::new(&config.poll);
+    let mut wake = source.subscribe();
+    let mut failures: u32 = 0;
+    let stop = &ctx.stop;
+
+    let reason = 'intake: loop {
+        while let Some(joined) = running.try_join_next_with_id() {
+            ids.remove(&joined_id(&joined));
+        }
+        if let Ok(error) = ack_failures.try_recv() {
+            failures += 1;
+            if restart(&ctx, &name, failures, &error).await {
+                break StopReason::Shutdown;
+            }
+            continue;
+        }
+
+        let permit = tokio::select! {
+            biased;
+            () = stop.cancelled() => break 'intake StopReason::Shutdown,
+            permit = Arc::clone(&slots).acquire_owned() => permit.expect("slots are never closed"),
+        };
+        if let Some(signal) = wake.as_mut() {
+            signal.mark_seen();
+        }
+        let polled = tokio::select! {
+            biased;
+            () = stop.cancelled() => break 'intake StopReason::Shutdown,
+            polled = source.poll() => polled,
+        };
+
+        match polled {
+            Err(e) => {
+                drop(permit);
+                failures += 1;
+                if restart(&ctx, &name, failures, &e.to_string()).await {
+                    break StopReason::Shutdown;
+                }
+            }
+            Ok(Polled::Empty) => {
+                failures = 0;
+                drop(permit);
+                let woke = tokio::select! {
+                    woke = poller.wait(wake.as_mut(), stop) => woke,
+                    Some(error) = ack_failures.recv() => {
+                        failures += 1;
+                        if restart(&ctx, &name, failures, &error).await {
+                            break StopReason::Shutdown;
+                        }
+                        continue;
+                    }
+                };
+                if woke == Wakeup::Stopped {
+                    break StopReason::Shutdown;
+                }
+            }
+            Ok(Polled::Closed(reason)) => {
+                warn!(
+                    event = "source",
+                    action = "closed",
+                    "source closed: queue={}, reason={:?}",
+                    name,
+                    reason.as_str()
+                );
+                break StopReason::SourceClosed(reason);
+            }
+            Ok(Polled::Task { message, receipt }) => {
+                failures = 0;
+                poller.reset();
+                let copy = dead_letter.as_ref().map(|h| (h.copy)(&message));
+                let mut task = match codec.decode(message) {
+                    Ok(task) => task,
+                    Err(error) => {
+                        drop(permit);
+                        if let (Some(h), Some(message)) = (&dead_letter, copy) {
+                            let letter = DeadLetter {
+                                queue: name.to_string(),
+                                message,
+                                error,
+                            };
+                            if catch_unwind(AssertUnwindSafe(|| (h.hook)(letter))).is_err() {
+                                error!(
+                                    event = "source",
+                                    action = "dead_letter_failed",
+                                    "dead-letter hook panicked: queue={}",
+                                    name
+                                );
+                            }
+                        } else {
+                            error!(
+                                event = "source",
+                                action = "message_dropped",
+                                "message dropped: queue={}, reason={:?}",
+                                name,
+                                error.to_string()
+                            );
+                        }
+                        if let Err(e) = source.ack(receipt).await {
+                            let _ = ack_errors.send(e.to_string());
+                        }
+                        continue;
+                    }
+                };
+                task.mark_accepted(SystemTime::now());
+                debug!(
+                    event = "task",
+                    action = "accepted",
+                    "task accepted: queue={}, task_id={}",
+                    name,
+                    task.id()
+                );
+                let ack_later = match task.ack_point().unwrap_or(config.ack_point) {
+                    AckPoint::OnAccept => {
+                        if let Err(e) = source.ack(receipt.clone()).await {
+                            let _ = ack_errors.send(e.to_string());
+                        }
+                        false
+                    }
+                    AckPoint::OnCompletion => true,
+                };
+                let task_id = task.id().clone();
+                let handle = running.spawn(execute(
+                    task,
+                    receipt,
+                    ack_later,
+                    service.clone(),
+                    drain_cancel.child_token(),
+                    permit,
+                    Arc::clone(&exec),
+                ));
+                ids.insert(handle.id(), task_id);
+            }
+        }
+    };
+
+    let graceful = matches!(reason, StopReason::Shutdown);
+    let (completed, cancelled, aborted) = drain(
+        &mut running,
+        &mut ids,
+        &name,
+        &drain_cancel,
+        graceful.then_some(ctx.shutdown_timeout),
+        config.cancel_grace,
+    )
+    .await;
+    drop(exec);
+    drop(ack_errors);
+    while let Ok(error) = ack_failures.try_recv() {
+        error!(
+            event = "source",
+            action = "failed",
+            "source failed: queue={}, error={:?}, restart_in=none",
+            name,
+            error
+        );
+    }
+    info!(
+        event = "worker",
+        action = "stopped",
+        "worker stopped: queue={}, reason={:?}",
+        name,
+        reason.to_string()
+    );
+    QueueReport {
+        queue: name.to_string(),
+        reason,
+        completed,
+        cancelled,
+        aborted,
+    }
+}
+
+/// Waits for running tasks: without a timeout when the source closed; with
+/// the shutdown timeout, then cancellation, then abort after `grace` on
+/// shutdown (rule 2.3.14). Returns (completed, cancelled, aborted).
+fn joined_id(joined: &Result<(tokio::task::Id, ()), tokio::task::JoinError>) -> tokio::task::Id {
+    match joined {
+        Ok((id, ())) => *id,
+        Err(e) => e.id(),
+    }
+}
+
+async fn drain(
+    running: &mut JoinSet<()>,
+    ids: &mut HashMap<tokio::task::Id, TaskId>,
+    queue: &str,
+    cancel: &CancellationToken,
+    shutdown_timeout: Option<Duration>,
+    grace: Duration,
+) -> (u32, u32, u32) {
+    let mut completed = 0;
+    let Some(timeout) = shutdown_timeout else {
+        while let Some(joined) = running.join_next_with_id().await {
+            ids.remove(&joined_id(&joined));
+            completed += 1;
+        }
+        return (completed, 0, 0);
+    };
+    if wait_all(running, ids, Instant::now() + timeout, &mut completed).await {
+        return (completed, 0, 0);
+    }
+    let cancelled = u32::try_from(running.len()).unwrap_or(u32::MAX);
+    cancel.cancel();
+    let mut finished_in_grace = 0;
+    if wait_all(running, ids, Instant::now() + grace, &mut finished_in_grace).await {
+        return (completed, cancelled, 0);
+    }
+    let aborted = u32::try_from(running.len()).unwrap_or(u32::MAX);
+    for task_id in ids.values() {
+        warn!(
+            event = "task",
+            action = "aborted",
+            "task aborted after cancel grace: queue={}, task_id={}",
+            queue,
+            task_id
+        );
+    }
+    running.abort_all();
+    while running.join_next().await.is_some() {}
+    (completed, cancelled, aborted)
+}
+
+/// Joins tasks until none is left (`true`) or the deadline passes (`false`).
+async fn wait_all(
+    running: &mut JoinSet<()>,
+    ids: &mut HashMap<tokio::task::Id, TaskId>,
+    deadline: Instant,
+    finished: &mut u32,
+) -> bool {
+    loop {
+        tokio::select! {
+            biased;
+            joined = running.join_next_with_id() => match joined {
+                Some(joined) => {
+                    ids.remove(&joined_id(&joined));
+                    *finished += 1;
+                }
+                None => return true,
+            },
+            () = tokio::time::sleep_until(deadline) => return false,
+        }
+    }
+}
+
+/// Runs one task to its final state (rules 2.3.2, 2.3.9, 2.3.15 p. 4).
+async fn execute<S, C, Svc, Args>(
+    mut task: Task<Args>,
+    receipt: S::Receipt,
+    ack_later: bool,
+    mut service: Svc,
+    cancel: CancellationToken,
+    permit: OwnedSemaphorePermit,
+    ctx: Arc<ExecCtx<S, C>>,
+) where
+    S: Source,
+    C: Codec<Args, S::Message>,
+    Svc: tower::Service<TaskRequest<Args>, Response = Outcome> + Send + 'static,
+    Svc::Error: Into<BoxError>,
+    Svc::Future: Send,
+    Args: Clone + Send + 'static,
+{
+    let mut life = Lifecycle::accepted();
+    advance(&mut life, TaskState::Running);
+    task.begin_attempt();
+    let id = task.id().clone();
+    let attempt = task.attempt();
+    let span = debug_span!("taskcraft.attempt", queue = %ctx.queue, task_id = %id, attempt);
+    async move {
+        debug!(
+            event = "task",
+            action = "started",
+            "task started: queue={}, task_id={}, attempt={}",
+            ctx.queue,
+            id,
+            attempt
+        );
+        let request = TaskRequest::new(
+            task.clone(),
+            Arc::clone(&ctx.registry),
+            Arc::clone(&ctx.shared),
+        );
+        let outcome = run_attempt(&mut service, request).await;
+
+        let (state, reason) = if cancel.is_cancelled() && !matches!(outcome, Outcome::Panic { .. })
+        {
+            (
+                TaskState::Cancelled,
+                Some(FinishReason::CancelledByShutdown),
+            )
+        } else {
+            match outcome {
+                Outcome::Success => (TaskState::Succeeded, None),
+                Outcome::Abort { reason } => (TaskState::Failed, Some(reason)),
+                Outcome::Panic { message } => {
+                    (TaskState::Panicked, Some(FinishReason::Panic(message)))
+                }
+                Outcome::Defer { delay, .. } if ctx.supports_defer => {
+                    match defer(&ctx, task, receipt.clone(), delay).await {
+                        Ok(()) => (TaskState::Deferred, None),
+                        Err(e) => (TaskState::Failed, Some(FinishReason::Handler(e))),
+                    }
+                }
+                // No retry policy yet: the default limit of one attempt is
+                // exhausted by the first "retry" (spec 2.8).
+                Outcome::Retry { .. } | Outcome::Defer { .. } => {
+                    (TaskState::Failed, Some(FinishReason::AttemptsExhausted))
+                }
+            }
+        };
+        advance(&mut life, state);
+        log_outcome(&ctx.queue, &id, attempt, state, reason.as_ref());
+
+        let acknowledged_by_defer = state == TaskState::Deferred;
+        let cancelled_by_shutdown = reason == Some(FinishReason::CancelledByShutdown);
+        if ack_later
+            && !acknowledged_by_defer
+            && !cancelled_by_shutdown
+            && let Err(e) = ctx.source.ack(receipt).await
+        {
+            let _ = ctx.ack_errors.send(e.to_string());
+        }
+        drop(permit);
+    }
+    .instrument(span)
+    .await;
+}
+
+async fn defer<S, C, Args>(
+    ctx: &ExecCtx<S, C>,
+    task: Task<Args>,
+    receipt: S::Receipt,
+    delay: Duration,
+) -> Result<(), String>
+where
+    S: Source,
+    C: Codec<Args, S::Message>,
+{
+    let message = ctx.codec.encode(task).map_err(|e| e.to_string())?;
+    ctx.source
+        .defer(receipt, message, Instant::now() + delay)
+        .await
+        .map_err(|e| format!("defer failed: {e}"))
+}
+
+fn advance(life: &mut Lifecycle, to: TaskState) {
+    // The worker only takes transitions of the lifecycle table; a failure
+    // here is a bug in the worker, not in the task.
+    let from = life.state();
+    let result = life.advance(to);
+    debug_assert!(result.is_ok(), "{from} -> {to}");
+}
+
+fn log_outcome(
+    queue: &str,
+    id: &TaskId,
+    attempt: u32,
+    state: TaskState,
+    reason: Option<&FinishReason>,
+) {
+    let reason_text = reason.map(ToString::to_string).unwrap_or_default();
+    match state {
+        TaskState::Panicked => error!(
+            event = "task",
+            action = "panicked",
+            "task panicked: queue={}, task_id={}, attempt={}, message={:?}",
+            queue,
+            id,
+            attempt,
+            reason_text
+        ),
+        TaskState::Failed => error!(
+            event = "task",
+            action = "failed",
+            "task failed: queue={}, task_id={}, attempt={}, reason={:?}",
+            queue,
+            id,
+            attempt,
+            reason_text
+        ),
+        _ => {}
+    }
+    debug!(
+        event = "task",
+        action = "finished",
+        "task finished: queue={}, task_id={}, attempt={}, outcome={}",
+        queue,
+        id,
+        attempt,
+        state
+    );
+}
