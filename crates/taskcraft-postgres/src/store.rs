@@ -59,7 +59,7 @@ pub enum PgStoreError {
     #[error(transparent)]
     Database(#[from] sqlx::Error),
     /// The process id is empty.
-    #[error("process id must not be empty")]
+    #[error("task store requires a process id")]
     EmptyProcessId,
     /// A live process already uses this process id (rule 2.3.19 p. 5).
     #[error("process id is taken: {0}")]
@@ -140,7 +140,7 @@ impl PgStoreBuilder {
             && lease.heartbeat * 2 >= lease.duration
         {
             return Err(ConfigError::InvalidDuration {
-                reason: "heartbeat interval must be below half the lease duration",
+                reason: "heartbeat interval must be less than half the lease",
             }
             .into());
         }
@@ -470,7 +470,11 @@ mod tests {
             heartbeat: Duration::from_secs(30),
         };
         let error = builder().lease(slow).validate().unwrap_err();
-        assert!(error.to_string().contains("below half the lease duration"));
+        assert!(
+            error
+                .to_string()
+                .contains("heartbeat interval must be less than half the lease")
+        );
         assert!(builder().retention(Duration::ZERO).validate().is_err());
         assert!(matches!(
             PgStore::builder("").validate(),

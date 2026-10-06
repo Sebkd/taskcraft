@@ -312,7 +312,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn push_wakes_mid_sleep() {
-        let source = Arc::new(InMemorySource::new(10));
+        let source = Arc::new(InMemorySource::new(10).unwrap());
         let mut signal = source.subscribe().unwrap();
         signal.mark_seen();
         let mut poller = Poller::new(&PollStrategy::FirstOf(vec![
@@ -353,7 +353,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn stop_wins_a_tie_with_a_wake_up() {
-        let source = InMemorySource::<u32>::new(10);
+        let source = InMemorySource::<u32>::new(10).unwrap();
         let mut signal = source.subscribe().unwrap();
         signal.mark_seen();
         source.close(); // wakes subscribers

@@ -36,6 +36,9 @@ pub enum ConfigError {
         /// The repeated name.
         name: String,
     },
+    /// A source capacity below 1.
+    #[error("capacity must be at least 1")]
+    InvalidCapacity,
     /// A concurrency limit below 1.
     #[error("concurrency must be at least 1")]
     InvalidConcurrency,

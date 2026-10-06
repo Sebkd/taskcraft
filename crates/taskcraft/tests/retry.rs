@@ -176,7 +176,7 @@ async fn defer_in_process_does_not_use_up_attempts() {
 /// delivers it again after the delay, with the attempt count kept.
 #[tokio::test(start_paused = true)]
 async fn defer_goes_to_a_source_that_supports_it() {
-    let source = Arc::new(InMemorySource::<u32>::new(10));
+    let source = Arc::new(InMemorySource::<u32>::new(10).unwrap());
     let runs: Runs = Arc::default();
     let start = Instant::now();
     let r = Arc::clone(&runs);

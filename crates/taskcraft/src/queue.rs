@@ -379,7 +379,7 @@ mod tests {
         ($name:expr) => {
             Queue::builder(
                 $name,
-                Arc::new(InMemorySource::<u32>::new(1)),
+                Arc::new(InMemorySource::<u32>::new(1).unwrap()),
                 IdentityCodec::new(),
                 task_fn(noop),
             )
@@ -416,7 +416,7 @@ mod tests {
         );
         let unrecoverable = Queue::builder(
             "q",
-            Arc::new(InMemorySource::<u32>::new(1)),
+            Arc::new(InMemorySource::<u32>::new(1).unwrap()),
             IdentityCodec::new(),
             task_fn(noop),
         );
@@ -426,7 +426,7 @@ mod tests {
         );
         let on_completion = Queue::builder(
             "q",
-            Arc::new(InMemorySource::<u32>::new(1)),
+            Arc::new(InMemorySource::<u32>::new(1).unwrap()),
             IdentityCodec::new(),
             task_fn(noop),
         )

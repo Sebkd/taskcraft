@@ -149,7 +149,7 @@ async fn log_source_commits_up_to_the_boundary() {
 fn ack_override_is_refused_by_a_log_and_accepted_by_memory() {
     let task = Task::new(()).with_ack_point(AckPoint::OnCompletion);
     let log = ToyLog::default().capabilities();
-    let memory = InMemorySource::<()>::new(1).capabilities();
+    let memory = InMemorySource::<()>::new(1).unwrap().capabilities();
     assert!(log.check_ack_override(task.ack_point()).is_err());
     assert!(memory.check_ack_override(task.ack_point()).is_ok());
 }
@@ -161,7 +161,7 @@ async fn memory_source_under_many_producers_and_consumers() {
     const CONSUMERS: usize = 6;
     let total = PRODUCERS * PER_PRODUCER;
 
-    let source = Arc::new(InMemorySource::<usize>::new(total));
+    let source = Arc::new(InMemorySource::<usize>::new(total).unwrap());
     let seen = Arc::new(Mutex::new(HashSet::new()));
 
     let mut producers = Vec::new();

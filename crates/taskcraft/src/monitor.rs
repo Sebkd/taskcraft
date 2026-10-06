@@ -477,7 +477,7 @@ mod tests {
         let queue = || {
             Queue::builder(
                 "reports",
-                Arc::new(InMemorySource::<u32>::new(1)),
+                Arc::new(InMemorySource::<u32>::new(1).unwrap()),
                 IdentityCodec::new(),
                 task_fn(noop),
             )
