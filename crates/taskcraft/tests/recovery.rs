@@ -80,7 +80,8 @@ async fn recovered_tasks_run_before_polled_ones() {
         .unwrap();
     assert!(recovered.fields["message"].contains("count=3"));
     stop.cancel();
-    assert_eq!(monitor.await.unwrap().queues[0].completed, 4);
+    // All four finished before the stop signal: not in the report (2.7.6).
+    assert_eq!(monitor.await.unwrap().queues[0].completed, 0);
 }
 
 /// Criterion 26, second run: a failing hook keeps the monitor from starting.

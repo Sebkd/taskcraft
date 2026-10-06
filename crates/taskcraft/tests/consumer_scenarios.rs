@@ -388,7 +388,8 @@ async fn machine_task_survives_a_crash_through_the_recovery_hook() {
     );
     stop.cancel();
     let report = running.await.unwrap();
-    assert_eq!(report.queues[0].completed, 1);
+    // The export finished before the stop signal: not in the report (2.7.6).
+    assert_eq!(report.queues[0].completed, 0);
 }
 
 /// Criterion 6: a panic with attempts left runs once, ends "panicked" with an
