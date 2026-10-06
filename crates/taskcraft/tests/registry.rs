@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
 
 mod common;
-use common::Captured;
+use common::{Captured, run};
 
 const SEC: Duration = Duration::from_secs(1);
 
@@ -34,7 +34,7 @@ async fn until(limit: Duration, cond: impl Fn() -> bool) -> bool {
 
 fn spawn(monitor: Monitor) -> (JoinHandle<ShutdownReport>, CancellationToken) {
     let stop = CancellationToken::new();
-    (tokio::spawn(monitor.run(stop.clone())), stop)
+    (tokio::spawn(run(monitor, stop.clone())), stop)
 }
 
 fn retry_policy(max_attempts: u32, base: Duration) -> RetryPolicy {
@@ -71,6 +71,7 @@ async fn concurrent_pushes_with_one_id_create_one_task() {
         async { sleep(10 * SEC).await }
     });
     let queue = Queue::builder("q", Arc::clone(&source), IdentityCodec::new(), handler)
+        .no_recovery()
         .build()
         .unwrap();
     let handle = queue.handle();
@@ -122,6 +123,7 @@ async fn registry_is_empty_after_many_tasks() {
         .concurrency(16)
         .retry_policy(retry_policy(2, SEC))
         .ack_point(AckPoint::OnCompletion)
+        .no_recovery()
         .build()
         .unwrap();
     let handle = queue.handle();
@@ -150,6 +152,7 @@ async fn cooperative_handler_stops_on_cancel() {
     let queue = Queue::builder("q", Arc::clone(&source), IdentityCodec::new(), handler)
         .ack_point(AckPoint::OnCompletion)
         .cancel_grace(30 * SEC)
+        .no_recovery()
         .build()
         .unwrap();
     let handle = queue.handle();
@@ -198,6 +201,7 @@ async fn ignoring_handler_is_aborted_after_the_grace() {
     });
     let queue = Queue::builder("q", Arc::clone(&source), IdentityCodec::new(), handler)
         .cancel_grace(5 * SEC)
+        .no_recovery()
         .build()
         .unwrap();
     let handle = queue.handle();
@@ -231,6 +235,7 @@ async fn queued_task_is_removed_from_the_source() {
         async {}
     });
     let queue = Queue::builder("q", Arc::clone(&source), IdentityCodec::new(), handler)
+        .no_recovery()
         .build()
         .unwrap();
     let handle = queue.handle();
@@ -259,6 +264,7 @@ async fn cancel_during_a_retry_pause() {
     let queue = Queue::builder("q", Arc::clone(&source), IdentityCodec::new(), handler)
         .retry_policy(retry_policy(3, 300 * SEC))
         .ack_point(AckPoint::OnCompletion)
+        .no_recovery()
         .build()
         .unwrap();
     let handle = queue.handle();
@@ -299,6 +305,7 @@ async fn cancel_while_waiting_for_a_slot() {
     });
     let queue = Queue::builder("q", Arc::clone(&source), IdentityCodec::new(), handler)
         .wait_limit(1)
+        .no_recovery()
         .build()
         .unwrap();
     let handle = queue.handle();
@@ -326,6 +333,7 @@ async fn status_of_a_running_task() {
     let source: Memory = Arc::default();
     let handler = task_fn(|_: u32| async { sleep(10 * SEC).await });
     let queue = Queue::builder("q", Arc::clone(&source), IdentityCodec::new(), handler)
+        .no_recovery()
         .build()
         .unwrap();
     let handle = queue.handle();
@@ -362,6 +370,7 @@ async fn duplicate_from_a_poll_is_acked_and_not_run() {
     });
     let queue = Queue::builder("q", Arc::clone(&source), IdentityCodec::new(), handler)
         .concurrency(2)
+        .no_recovery()
         .build()
         .unwrap();
     let handle = queue.handle();
@@ -426,6 +435,7 @@ fn bytes_queue(source: &Arc<BytesSource>) -> Queue<BytesSource, JsonCodec, impl 
         JsonCodec::new(MetadataRegistry::new()),
         task_fn(|_: u32| async {}),
     )
+    .no_recovery()
     .build()
     .unwrap()
 }
@@ -480,6 +490,7 @@ async fn push_errors() {
         IdentityCodec::new(),
         task_fn(|_: u32| async {}),
     )
+    .no_recovery()
     .build()
     .unwrap();
     let handle = queue.handle();

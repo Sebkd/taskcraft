@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::future::pending;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
@@ -20,7 +21,7 @@ use crate::metadata::MetadataRegistry;
 use crate::monitor::{QueueReport, StopReason, WorkerContext};
 use crate::outcome::{BoxError, Outcome};
 use crate::poll::{Poller, Wakeup};
-use crate::queue::{DeadLetter, OverflowPolicy, Queue};
+use crate::queue::{DeadLetter, OverflowPolicy, Queue, TimeoutOutcome};
 use crate::registry::TaskRegistry;
 use crate::retry::RetryPolicy;
 use crate::source::{Polled, Source};
@@ -77,6 +78,8 @@ struct ExecCtx<S: Source, C> {
     retry: RetryPolicy,
     tasks: Arc<TaskRegistry>,
     cancel_grace: Duration,
+    attempt_timeout: Option<Duration>,
+    timeout_outcome: TimeoutOutcome,
 }
 
 /// Sleeps the restart delay unless stopped; returns `true` when stopped.
@@ -114,6 +117,7 @@ async fn restart(ctx: &WorkerContext, queue: &str, failures: u32, error: &str) -
 
 pub(crate) async fn run_worker<S, C, Svc, Args>(
     queue: Queue<S, C, Svc, Args>,
+    recovered: Vec<Task<Args>>,
     pools: Vec<PoolClaim>,
     ctx: WorkerContext,
 ) -> QueueReport
@@ -161,6 +165,8 @@ where
         retry: config.retry,
         tasks: Arc::clone(&tasks),
         cancel_grace: config.cancel_grace,
+        attempt_timeout: config.attempt_timeout,
+        timeout_outcome: config.timeout_outcome,
     });
     let (reject, wait_limit) = match overflow {
         OverflowPolicy::Wait { limit } => (None, limit.unwrap_or(config.concurrency)),
@@ -174,6 +180,52 @@ where
     let mut wake = source.subscribe();
     let mut failures: u32 = 0;
     let stop = &ctx.stop;
+
+    // Recovered tasks are accepted before the first poll, never rejected and
+    // never acknowledged: they are not in the source (rule 2.3.18).
+    for mut task in recovered {
+        let accepted_at = SystemTime::now();
+        let task_cancel = drain_cancel.child_token();
+        if tasks
+            .try_accept(task.id(), accepted_at, task_cancel.clone())
+            .is_err()
+        {
+            debug!(
+                event = "task",
+                action = "duplicate",
+                "duplicate task: queue={}, task_id={}",
+                name,
+                task.id()
+            );
+            continue;
+        }
+        task.mark_accepted(accepted_at);
+        debug!(
+            event = "task",
+            action = "accepted",
+            "task accepted: queue={}, task_id={}",
+            name,
+            task.id()
+        );
+        let slot = match Arc::clone(&slots).try_acquire_owned() {
+            Ok(permit) => Slot::Held(permit),
+            Err(_) => Slot::Wait {
+                place: None,
+                slots: Arc::clone(&slots),
+            },
+        };
+        let task_id = task.id().clone();
+        let handle = running.spawn(execute(
+            task,
+            None,
+            false,
+            service.clone(),
+            task_cancel,
+            slot,
+            Arc::clone(&exec),
+        ));
+        ids.insert(handle.id(), task_id);
+    }
 
     let reason = 'intake: loop {
         while let Some(joined) = running.try_join_next_with_id() {
@@ -348,7 +400,7 @@ where
                 let task_id = task.id().clone();
                 let handle = running.spawn(execute(
                     task,
-                    receipt,
+                    Some(receipt),
                     ack_later,
                     service.clone(),
                     task_cancel,
@@ -523,7 +575,7 @@ enum Next {
 /// (rules 2.3.2–2.3.6, 2.3.9, 2.3.15).
 async fn execute<S, C, Svc, Args>(
     mut task: Task<Args>,
-    receipt: S::Receipt,
+    receipt: Option<S::Receipt>,
     ack_later: bool,
     mut service: Svc,
     cancel: CancellationToken,
@@ -605,31 +657,53 @@ where
             e.attempt_started_at = Some(SystemTime::now());
             e.next_attempt_at = None;
         });
+        // The attempt's own flag: set by the task's flag and by the attempt
+        // timeout, which must not cancel the retries that follow.
+        let attempt_cancel = cancel.child_token();
         let request = TaskRequest::new(
             task.clone(),
             Arc::clone(&ctx.registry),
             Arc::clone(&ctx.shared),
         )
-        .with_cancel(cancel.clone());
+        .with_cancel(attempt_cancel.clone());
+        let timed_out = AtomicBool::new(false);
         let outcome = tokio::select! {
             outcome = attempt(&mut service, request, &ctx) => Some(outcome),
             () = forced_abort(&cancel, &ctx.tasks, &id, ctx.cancel_grace) => None,
+            () = expire(&ctx, &attempt_cancel, &timed_out, &id, number) => None,
         };
+        if outcome.is_none() {
+            warn!(
+                event = "task",
+                action = "aborted",
+                "task aborted after cancel grace: queue={}, task_id={}",
+                ctx.queue,
+                id
+            );
+        }
+        // With the cancel flag set, the reason of the flag decides, not what
+        // the handler returned; a panic stays a panic (rule 2.3.15 p. 4).
         let next = match outcome {
-            None => {
-                warn!(
-                    event = "task",
-                    action = "aborted",
-                    "task aborted after cancel grace: queue={}, task_id={}",
-                    ctx.queue,
-                    id
-                );
-                Next::Finish(TaskState::Cancelled, Some(FinishReason::CancelledByUser))
+            Some(outcome @ Outcome::Panic { .. }) => {
+                decide(outcome, &mut task, receipt.clone(), &ctx).await
             }
-            Some(outcome) if cancel.is_cancelled() && !matches!(outcome, Outcome::Panic { .. }) => {
+            _ if cancel.is_cancelled() => {
                 Next::Finish(TaskState::Cancelled, Some(ctx.tasks.cancel_reason(&id)))
             }
+            _ if timed_out.load(Ordering::Relaxed) => match ctx.timeout_outcome {
+                TimeoutOutcome::Abort => {
+                    Next::Finish(TaskState::Failed, Some(FinishReason::AttemptTimeout))
+                }
+                TimeoutOutcome::Retry => {
+                    let retry = Outcome::Retry {
+                        reason: FinishReason::AttemptTimeout,
+                        delay: None,
+                    };
+                    decide(retry, &mut task, receipt.clone(), &ctx).await
+                }
+            },
             Some(outcome) => decide(outcome, &mut task, receipt.clone(), &ctx).await,
+            None => Next::Finish(TaskState::Cancelled, Some(FinishReason::CancelledByUser)),
         };
 
         match next {
@@ -705,6 +779,32 @@ async fn forced_abort(
     sleep(grace).await;
 }
 
+/// Completes `grace` after the attempt timeout expired; never without a
+/// timeout (rule 2.3.16, spec 2.1.2.13).
+async fn expire<S: Source, C>(
+    ctx: &ExecCtx<S, C>,
+    attempt_cancel: &CancellationToken,
+    timed_out: &AtomicBool,
+    id: &TaskId,
+    attempt: u32,
+) {
+    let Some(timeout) = ctx.attempt_timeout else {
+        return pending().await;
+    };
+    sleep(timeout).await;
+    timed_out.store(true, Ordering::Relaxed);
+    warn!(
+        event = "task",
+        action = "timed_out",
+        "task attempt timed out: queue={}, task_id={}, attempt={}",
+        ctx.queue,
+        id,
+        attempt
+    );
+    attempt_cancel.cancel();
+    sleep(ctx.cancel_grace).await;
+}
+
 /// The final state or defer: logged, taken out of the registry and acked
 /// unless deferred or cancelled by shutdown (rule 2.3.9, spec 2.1.2.15 p. 8).
 async fn finish<S: Source, C>(
@@ -712,7 +812,7 @@ async fn finish<S: Source, C>(
     life: &mut Lifecycle,
     id: &TaskId,
     attempt: u32,
-    receipt: S::Receipt,
+    receipt: Option<S::Receipt>,
     ack_later: bool,
     (state, reason): (TaskState, Option<FinishReason>),
 ) -> TaskEnd {
@@ -724,6 +824,7 @@ async fn finish<S: Source, C>(
     if ack_later
         && !acknowledged_by_defer
         && !cancelled_by_shutdown
+        && let Some(receipt) = receipt
         && let Err(e) = ctx.source.ack(receipt).await
     {
         let _ = ctx.ack_errors.send(e.to_string());
@@ -765,7 +866,7 @@ where
 async fn decide<S, C, Args>(
     outcome: Outcome,
     task: &mut Task<Args>,
-    receipt: S::Receipt,
+    receipt: Option<S::Receipt>,
     ctx: &ExecCtx<S, C>,
 ) -> Next
 where
@@ -798,7 +899,10 @@ where
             Next::Pause(pause)
         }
         Outcome::Defer { delay, .. } => {
-            if ctx.supports_defer {
+            // A recovered task has no delivery to hand back.
+            if ctx.supports_defer
+                && let Some(receipt) = receipt
+            {
                 match defer(ctx, task.clone(), receipt, delay).await {
                     Ok(()) => return Next::Finish(TaskState::Deferred, None),
                     Err(error) => warn!(

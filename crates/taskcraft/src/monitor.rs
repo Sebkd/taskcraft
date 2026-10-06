@@ -13,10 +13,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::codec::Codec;
-use crate::error::ConfigError;
+use crate::error::{ConfigError, RecoveryError};
 use crate::handler::{BoxFuture, TaskRequest};
 use crate::outcome::{BoxError, Outcome};
 use crate::queue::Queue;
+use crate::registry::TaskRegistry;
 use crate::source::{CloseReason, Source};
 use crate::worker::{PoolClaim, run_worker};
 
@@ -109,6 +110,17 @@ pub(crate) struct WorkerContext {
 
 type WorkerFn = Box<dyn FnOnce(WorkerContext) -> BoxFuture<'static, QueueReport> + Send>;
 
+/// Runs the queue's recovery hook and returns its worker (transitions
+/// 2.4.2.1, 2.4.2.2).
+type StartFn = Box<dyn FnOnce() -> BoxFuture<'static, Result<WorkerFn, BoxError>> + Send>;
+
+/// A registered queue, not started yet.
+struct Registered {
+    name: String,
+    tasks: Arc<TaskRegistry>,
+    start: StartFn,
+}
+
 /// Owns the workers of a process: one per registered queue.
 ///
 /// ```no_run
@@ -120,6 +132,7 @@ type WorkerFn = Box<dyn FnOnce(WorkerContext) -> BoxFuture<'static, QueueReport>
 /// let source = Arc::new(InMemorySource::default());
 /// let queue = Queue::builder("reports", source, IdentityCodec::new(), task_fn(send_report))
 ///     .concurrency(4)
+///     .no_recovery()
 ///     .build()?;
 /// let stop = CancellationToken::new();
 /// let report = Monitor::new().register(queue)?.run(stop).await;
@@ -131,7 +144,7 @@ pub struct Monitor {
     restart: RestartDelays,
     names: HashSet<String>,
     pools: HashMap<String, (u32, Arc<Semaphore>)>,
-    workers: Vec<WorkerFn>,
+    queues: Vec<Registered>,
 }
 
 impl Monitor {
@@ -147,7 +160,7 @@ impl Monitor {
             },
             names: HashSet::new(),
             pools: HashMap::new(),
-            workers: Vec::new(),
+            queues: Vec::new(),
         }
     }
 
@@ -249,23 +262,95 @@ impl Monitor {
                 permits,
             });
         }
-        self.names.insert(name);
-        self.workers.push(Box::new(move |ctx| {
-            Box::pin(run_worker(queue, claims, ctx))
-        }));
+        self.names.insert(name.clone());
+        let mut queue = queue;
+        let hook = queue.recovery.take();
+        let tasks = Arc::clone(&queue.tasks);
+        let queue_name = name.clone();
+        let start: StartFn = Box::new(move || {
+            Box::pin(async move {
+                let recovered = match hook {
+                    Some(hook) => {
+                        let tasks = hook().await?;
+                        info!(
+                            event = "recovery",
+                            action = "recovered",
+                            "tasks recovered: queue={}, count={}",
+                            queue_name,
+                            tasks.len()
+                        );
+                        tasks
+                    }
+                    None => Vec::new(),
+                };
+                let worker: WorkerFn =
+                    Box::new(move |ctx| Box::pin(run_worker(queue, recovered, claims, ctx)));
+                Ok(worker)
+            })
+        });
+        self.queues.push(Registered { name, tasks, start });
         Ok(self)
     }
 
-    /// Runs every registered queue until `stop` fires or every source
-    /// closes, and reports how each one stopped.
-    pub async fn run(self, stop: CancellationToken) -> ShutdownReport {
+    /// Runs the recovery hooks, then every registered queue until `stop`
+    /// fires or every source closes, and reports how each one stopped.
+    ///
+    /// A stop signal during the hooks ends the run before any queue starts
+    /// (transition 2.4.2.11).
+    ///
+    /// # Errors
+    ///
+    /// [`RecoveryError`] when a recovery hook fails: no queue starts
+    /// (scenario 2.2.8).
+    pub async fn run(self, stop: CancellationToken) -> Result<ShutdownReport, RecoveryError> {
         let ctx = WorkerContext {
             stop: stop.clone(),
             shutdown_timeout: self.shutdown_timeout,
             restart: self.restart,
         };
+        let mut started = Vec::with_capacity(self.queues.len());
+        let mut names = Vec::with_capacity(self.queues.len());
+        let mut registries = Vec::with_capacity(self.queues.len());
+        for Registered { name, tasks, start } in self.queues {
+            let result = tokio::select! {
+                biased;
+                () = stop.cancelled() => None,
+                result = start() => Some(result),
+            };
+            registries.push(tasks);
+            match result {
+                Some(Ok(worker)) => started.push(worker),
+                Some(Err(e)) => {
+                    error!(
+                        event = "recovery",
+                        action = "failed",
+                        "recovery failed: queue={}, error={:?}",
+                        name,
+                        e.to_string()
+                    );
+                    close_all(&registries);
+                    return Err(RecoveryError::new(name, e));
+                }
+                None => {
+                    names.push(name);
+                    close_all(&registries);
+                    let queues = names
+                        .into_iter()
+                        .map(|queue| QueueReport {
+                            queue,
+                            reason: StopReason::Shutdown,
+                            completed: 0,
+                            cancelled: 0,
+                            aborted: 0,
+                        })
+                        .collect();
+                    return Ok(ShutdownReport { queues });
+                }
+            }
+            names.push(name);
+        }
         let mut workers = JoinSet::new();
-        for (index, worker) in self.workers.into_iter().enumerate() {
+        for (index, worker) in started.into_iter().enumerate() {
             let ctx = ctx.clone();
             workers.spawn(async move { (index, worker(ctx).await) });
         }
@@ -303,7 +388,14 @@ impl Monitor {
                 report.aborted()
             );
         }
-        report
+        Ok(report)
+    }
+}
+
+/// Pushes are refused once the monitor will not run the queues.
+fn close_all(registries: &[Arc<TaskRegistry>]) {
+    for tasks in registries {
+        tasks.set_closing();
     }
 }
 
@@ -371,6 +463,7 @@ mod tests {
                 IdentityCodec::new(),
                 task_fn(noop),
             )
+            .no_recovery()
             .build()
             .unwrap()
         };
