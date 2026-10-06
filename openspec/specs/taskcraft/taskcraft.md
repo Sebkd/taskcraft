@@ -1,6 +1,6 @@
 # Спецификация на taskcraft
 
-Версия спецификации - 0.9 (проект: спецификация задаёт целевое поведение первой версии; что уже реализовано — в таблице «Статус реализации», раздел 1.1)
+Версия спецификации - 0.10 (проект: спецификация задаёт целевое поведение первой версии; что уже реализовано — в таблице «Статус реализации», раздел 1.1)
 
 <!-- TOC -->
 * [1. Общие сведения](#1-общие-сведения)
@@ -108,7 +108,7 @@ tower, всё остальное — слои. Кодовая база apalis н
 | `test-harness` | 4.3 п. 8, 4.2 | реализовано (2026-10-06) |
 | `worker-loop-and-supervision` | 2.4.2, 2.3.12–2.3.14, 2.1.2.2–2.1.2.8, 2.1.2.11, 2.1.2.12, 2.1.2.16, 2.1.2.17, 2.7.6 | реализовано (2026-10-06) |
 | `interruptible-poll-strategies` | 2.3.24 | реализовано (2026-10-06) |
-| `overflow-policy-and-resource-pools` | 2.3.7, 2.3.8, 2.2.1, 2.2.2 | не реализовано |
+| `overflow-policy-and-resource-pools` | 2.3.7, 2.3.8, 2.2.1, 2.2.2 | реализовано (2026-10-06) |
 | `retry-policy` | 2.3.3–2.3.6, 2.1.2.9, 2.1.2.10 | не реализовано |
 | `task-registry` | 2.3.11, 2.3.15, 2.1.2.1, 2.1.2.14, 2.1.2.15 | не реализовано |
 | `ownership-and-recovery` | 2.3.16, 2.3.18, 2.3.19 п. 3, 2.1.2.13, 2.2.8, 2.2.12 | не реализовано |
@@ -1399,6 +1399,7 @@ stateDiagram-v2
 | WARN | `task` | `timed_out` | Таймаут попытки | `task attempt timed out: queue={}, task_id={}, attempt={}` |
 | WARN | `task` | `aborted` | Принудительное прерывание после льготного времени | `task aborted after cancel grace: queue={}, task_id={}` |
 | WARN | `task` | `rejected` | Отказ по переполнению | `task rejected: queue={}, task_id={}, reason=overflow` |
+| ERROR | `task` | `reject_failed` | Хук отказа паникнул; сообщение всё равно подтверждается | `reject hook panicked: queue={}, task_id={}` |
 | WARN | `lease` | `taken_over` | Задача подхвачена по истечении аренды | `task taken over after lease expiry: queue={}, task_id={}, previous_owner={}` |
 | WARN | `lease` | `lost` | Аренда потеряна, задача прекращена | `lease lost: queue={}, task_id={}` |
 | WARN | `observer` | `failed` | Ошибка наблюдателя | `observer failed: observer={}, error="{}"` |

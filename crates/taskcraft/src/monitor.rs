@@ -1,9 +1,12 @@
 //! The monitor: owns the workers of a process, starts and stops them, and
 //! reports how shutdown went (spec 2.5, 2.7.6).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
+
+use tokio::sync::Semaphore;
 
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -15,7 +18,7 @@ use crate::handler::{BoxFuture, TaskRequest};
 use crate::outcome::{BoxError, Outcome};
 use crate::queue::Queue;
 use crate::source::{CloseReason, Source};
-use crate::worker::run_worker;
+use crate::worker::{PoolClaim, run_worker};
 
 /// Why a queue's worker stopped.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +130,7 @@ pub struct Monitor {
     shutdown_timeout: Duration,
     restart: RestartDelays,
     names: HashSet<String>,
+    pools: HashMap<String, (u32, Arc<Semaphore>)>,
     workers: Vec<WorkerFn>,
 }
 
@@ -142,6 +146,7 @@ impl Monitor {
                 max: Duration::from_secs(60),
             },
             names: HashSet::new(),
+            pools: HashMap::new(),
             workers: Vec::new(),
         }
     }
@@ -175,12 +180,40 @@ impl Monitor {
         Ok(self)
     }
 
+    /// Declares a resource pool shared by every queue of this monitor
+    /// (rule 2.3.8). Declare pools before registering queues that use them.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::InvalidPool`] for size 0 or a name declared twice.
+    pub fn pool(mut self, name: impl Into<String>, size: u32) -> Result<Self, ConfigError> {
+        let name = name.into();
+        if size == 0 {
+            return Err(ConfigError::InvalidPool {
+                name,
+                reason: "pool size must be at least 1",
+            });
+        }
+        if self.pools.contains_key(&name) {
+            return Err(ConfigError::InvalidPool {
+                name,
+                reason: "duplicate pool name",
+            });
+        }
+        let semaphore = Arc::new(Semaphore::new(size as usize));
+        self.pools.insert(name, (size, semaphore));
+        Ok(self)
+    }
+
     /// Registers a queue.
     ///
     /// # Errors
     ///
     /// [`ConfigError::DuplicateQueueName`] when the monitor already has a
-    /// queue with this name.
+    /// queue with this name; [`ConfigError::UnknownPool`],
+    /// [`ConfigError::PermitsExceedPool`] or [`ConfigError::InvalidPool`]
+    /// when the queue requires a pool the monitor does not have, more permits
+    /// than the pool holds, or zero permits.
     pub fn register<S, C, Svc, Args>(
         mut self,
         queue: Queue<S, C, Svc, Args>,
@@ -194,11 +227,32 @@ impl Monitor {
         Args: Clone + Send + 'static,
     {
         let name = queue.name().to_owned();
-        if !self.names.insert(name.clone()) {
+        if self.names.contains(&name) {
             return Err(ConfigError::DuplicateQueueName { name });
         }
-        self.workers
-            .push(Box::new(move |ctx| Box::pin(run_worker(queue, ctx))));
+        let mut claims = Vec::new();
+        for (pool, &permits) in &queue.config.pools {
+            let Some((size, semaphore)) = self.pools.get(pool) else {
+                return Err(ConfigError::UnknownPool { name: pool.clone() });
+            };
+            if permits == 0 {
+                return Err(ConfigError::InvalidPool {
+                    name: pool.clone(),
+                    reason: "permits must be at least 1",
+                });
+            }
+            if permits > *size {
+                return Err(ConfigError::PermitsExceedPool { name: pool.clone() });
+            }
+            claims.push(PoolClaim {
+                semaphore: Arc::clone(semaphore),
+                permits,
+            });
+        }
+        self.names.insert(name);
+        self.workers.push(Box::new(move |ctx| {
+            Box::pin(run_worker(queue, claims, ctx))
+        }));
         Ok(self)
     }
 
@@ -265,6 +319,7 @@ impl fmt::Debug for Monitor {
             .field("shutdown_timeout", &self.shutdown_timeout)
             .field("restart", &self.restart)
             .field("queues", &self.names)
+            .field("pools", &self.pools.keys().collect::<Vec<_>>())
             .finish()
     }
 }
