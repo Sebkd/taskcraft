@@ -26,6 +26,13 @@ pub enum ConfigError {
         /// The reserved name.
         name: String,
     },
+    /// A poll strategy with a zero duration, a minimum above its maximum or
+    /// an empty composition.
+    #[error("invalid poll strategy: {reason}")]
+    InvalidPollStrategy {
+        /// What is wrong, worded as in the configuration rules.
+        reason: &'static str,
+    },
 }
 
 /// A failure to encode or parse task metadata.
