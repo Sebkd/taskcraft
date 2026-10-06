@@ -2,6 +2,7 @@
 //! (spec 2.4.2, 2.3.12–2.3.14).
 
 use std::collections::HashMap;
+use std::future::pending;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -20,6 +21,7 @@ use crate::monitor::{QueueReport, StopReason, WorkerContext};
 use crate::outcome::{BoxError, Outcome};
 use crate::poll::{Poller, Wakeup};
 use crate::queue::{DeadLetter, OverflowPolicy, Queue};
+use crate::registry::TaskRegistry;
 use crate::retry::RetryPolicy;
 use crate::source::{Polled, Source};
 use crate::state::{Lifecycle, TaskState};
@@ -73,6 +75,8 @@ struct ExecCtx<S: Source, C> {
     pools: Vec<PoolClaim>,
     slots: Arc<Semaphore>,
     retry: RetryPolicy,
+    tasks: Arc<TaskRegistry>,
+    cancel_grace: Duration,
 }
 
 /// Sleeps the restart delay unless stopped; returns `true` when stopped.
@@ -130,6 +134,7 @@ where
         shared,
         dead_letter,
         overflow,
+        tasks,
         ..
     } = queue;
     let name: Arc<str> = config.name.into();
@@ -154,6 +159,8 @@ where
         pools,
         slots: Arc::clone(&slots),
         retry: config.retry,
+        tasks: Arc::clone(&tasks),
+        cancel_grace: config.cancel_grace,
     });
     let (reject, wait_limit) = match overflow {
         OverflowPolicy::Wait { limit } => (None, limit.unwrap_or(config.concurrency)),
@@ -277,6 +284,27 @@ where
                         continue;
                     }
                 };
+                // Rule 2.3.11: a busy id is a duplicate delivery, acked and
+                // not run (scenario 2.2.3).
+                let accepted_at = SystemTime::now();
+                let task_cancel = drain_cancel.child_token();
+                if tasks
+                    .try_accept(task.id(), accepted_at, task_cancel.clone())
+                    .is_err()
+                {
+                    drop(gate);
+                    debug!(
+                        event = "task",
+                        action = "duplicate",
+                        "duplicate task: queue={}, task_id={}",
+                        name,
+                        task.id()
+                    );
+                    if let Err(e) = source.ack(receipt).await {
+                        let _ = ack_errors.send(e.to_string());
+                    }
+                    continue;
+                }
                 let slot = match gate {
                     Gate::Slot(permit) => Slot::Held(permit),
                     Gate::Waiting(place) => match Arc::clone(&slots).try_acquire_owned() {
@@ -291,6 +319,7 @@ where
                             Slot::Held(permit)
                         } else {
                             let hook = reject.as_ref().expect("Free gate means reject policy");
+                            tasks.remove(task.id());
                             reject_task(&name, &**hook, task);
                             if let Err(e) = source.ack(receipt).await {
                                 let _ = ack_errors.send(e.to_string());
@@ -299,7 +328,7 @@ where
                         }
                     }
                 };
-                task.mark_accepted(SystemTime::now());
+                task.mark_accepted(accepted_at);
                 debug!(
                     event = "task",
                     action = "accepted",
@@ -322,7 +351,7 @@ where
                     receipt,
                     ack_later,
                     service.clone(),
-                    drain_cancel.child_token(),
+                    task_cancel,
                     slot,
                     Arc::clone(&exec),
                 ));
@@ -331,10 +360,13 @@ where
         }
     };
 
+    // Pushes are refused from now on (rule 2.3.14 p. 3).
+    tasks.set_closing();
     let graceful = matches!(reason, StopReason::Shutdown);
     let (completed, cancelled, aborted) = drain(
         &mut running,
         &mut ids,
+        &tasks,
         &name,
         &drain_cancel,
         graceful.then_some(ctx.shutdown_timeout),
@@ -402,6 +434,7 @@ fn joined_id<T>(joined: &Result<(tokio::task::Id, T), tokio::task::JoinError>) -
 async fn drain(
     running: &mut JoinSet<TaskEnd>,
     ids: &mut HashMap<tokio::task::Id, TaskId>,
+    tasks: &TaskRegistry,
     queue: &str,
     cancel: &CancellationToken,
     shutdown_timeout: Option<Duration>,
@@ -434,6 +467,7 @@ async fn drain(
             queue,
             task_id
         );
+        tasks.remove(task_id);
     }
     running.abort_all();
     while running.join_next().await.is_some() {}
@@ -486,7 +520,7 @@ enum Next {
 }
 
 /// Runs one task to its final state, retrying as the queue's policy allows
-/// (rules 2.3.2–2.3.6, 2.3.9, 2.3.15 p. 4).
+/// (rules 2.3.2–2.3.6, 2.3.9, 2.3.15).
 async fn execute<S, C, Svc, Args>(
     mut task: Task<Args>,
     receipt: S::Receipt,
@@ -504,13 +538,15 @@ where
     Svc::Future: Send,
     Args: Clone + Send + 'static,
 {
+    let id = task.id().clone();
     let mut life = Lifecycle::accepted();
     let mut first = Some(slot);
     let mut held: Option<OwnedSemaphorePermit> = None;
     loop {
         // Accepted: the slot (from intake, kept through the pause, or taken
         // again after it), then the pools in name order. Shutdown cancels a
-        // task that is still waiting (rule 2.3.14 p. 4).
+        // task that is still waiting (rule 2.3.14 p. 4), and so does a
+        // cancel request (spec 2.1.2.15 p. 2).
         let slot = match (held.take(), first.take()) {
             (Some(permit), _) | (None, Some(Slot::Held(permit))) => Slot::Held(permit),
             (None, Some(waiting)) => waiting,
@@ -525,7 +561,13 @@ where
                 let permit = tokio::select! {
                     biased;
                     () = ctx.stop.cancelled() => {
-                        return cancel_waiting(&ctx, &mut life, &task);
+                        return cancel_waiting(&ctx, &mut life, &id, task.attempt());
+                    }
+                    () = cancel.cancelled() => {
+                        let reason = ctx.tasks.cancel_reason(&id);
+                        let end = (TaskState::Cancelled, Some(reason));
+                        return finish(&ctx, &mut life, &id, task.attempt(), receipt, ack_later, end)
+                            .await;
                     }
                     permit = slots.acquire_owned() => permit.expect("slots are never closed"),
                 };
@@ -538,7 +580,13 @@ where
             let permits = tokio::select! {
                 biased;
                 () = ctx.stop.cancelled() => {
-                    return cancel_waiting(&ctx, &mut life, &task);
+                    return cancel_waiting(&ctx, &mut life, &id, task.attempt());
+                }
+                () = cancel.cancelled() => {
+                    let reason = ctx.tasks.cancel_reason(&id);
+                    let end = (TaskState::Cancelled, Some(reason));
+                    return finish(&ctx, &mut life, &id, task.attempt(), receipt, ack_later, end)
+                        .await;
                 }
                 permits = Arc::clone(&claim.semaphore).acquire_many_owned(claim.permits) => {
                     permits.expect("pools are never closed")
@@ -549,48 +597,70 @@ where
 
         advance(&mut life, TaskState::Running);
         task.begin_attempt();
+        let (number, retries) = (task.attempt(), task.retries());
+        ctx.tasks.update(&id, |e| {
+            e.state = TaskState::Running;
+            e.attempt = number;
+            e.retries = retries;
+            e.attempt_started_at = Some(SystemTime::now());
+            e.next_attempt_at = None;
+        });
         let request = TaskRequest::new(
             task.clone(),
             Arc::clone(&ctx.registry),
             Arc::clone(&ctx.shared),
-        );
-        let outcome = attempt(&mut service, request, &ctx).await;
-        let next = if cancel.is_cancelled() && !matches!(outcome, Outcome::Panic { .. }) {
-            Next::Finish(
-                TaskState::Cancelled,
-                Some(FinishReason::CancelledByShutdown),
-            )
-        } else {
-            decide(outcome, &mut task, receipt.clone(), &ctx).await
+        )
+        .with_cancel(cancel.clone());
+        let outcome = tokio::select! {
+            outcome = attempt(&mut service, request, &ctx) => Some(outcome),
+            () = forced_abort(&cancel, &ctx.tasks, &id, ctx.cancel_grace) => None,
+        };
+        let next = match outcome {
+            None => {
+                warn!(
+                    event = "task",
+                    action = "aborted",
+                    "task aborted after cancel grace: queue={}, task_id={}",
+                    ctx.queue,
+                    id
+                );
+                Next::Finish(TaskState::Cancelled, Some(FinishReason::CancelledByUser))
+            }
+            Some(outcome) if cancel.is_cancelled() && !matches!(outcome, Outcome::Panic { .. }) => {
+                Next::Finish(TaskState::Cancelled, Some(ctx.tasks.cancel_reason(&id)))
+            }
+            Some(outcome) => decide(outcome, &mut task, receipt.clone(), &ctx).await,
         };
 
         match next {
             Next::Finish(state, reason) => {
-                advance(&mut life, state);
-                log_outcome(
-                    &ctx.queue,
-                    task.id(),
+                let end = (state, reason);
+                let ended = finish(
+                    &ctx,
+                    &mut life,
+                    &id,
                     task.attempt(),
-                    state,
-                    reason.as_ref(),
+                    receipt,
+                    ack_later,
+                    end,
                 );
-                let acknowledged_by_defer = state == TaskState::Deferred;
-                let cancelled_by_shutdown = reason == Some(FinishReason::CancelledByShutdown);
-                if ack_later
-                    && !acknowledged_by_defer
-                    && !cancelled_by_shutdown
-                    && let Err(e) = ctx.source.ack(receipt).await
-                {
-                    let _ = ctx.ack_errors.send(e.to_string());
-                }
+                let ended = ended.await;
                 drop(pool_permits);
                 drop(permit);
-                return TaskEnd::Finished;
+                return ended;
             }
             Next::Pause(pause) => {
                 // Waiting to retry: pools go back always, the slot unless the
                 // policy keeps it (rule 2.3.5).
                 advance(&mut life, TaskState::RetryWaiting);
+                let due = SystemTime::now() + pause;
+                let retries = task.retries();
+                ctx.tasks.update(&id, |e| {
+                    e.state = TaskState::RetryWaiting;
+                    e.retries = retries;
+                    e.attempt_started_at = None;
+                    e.next_attempt_at = Some(due);
+                });
                 drop(pool_permits);
                 if ctx.retry.hold_slot {
                     held = Some(permit);
@@ -600,14 +670,65 @@ where
                 tokio::select! {
                     biased;
                     () = ctx.stop.cancelled() => {
-                        return cancel_waiting(&ctx, &mut life, &task);
+                        return cancel_waiting(&ctx, &mut life, &id, task.attempt());
+                    }
+                    () = cancel.cancelled() => {
+                        let reason = ctx.tasks.cancel_reason(&id);
+                        let end = (TaskState::Cancelled, Some(reason));
+                        return finish(&ctx, &mut life, &id, task.attempt(), receipt, ack_later, end)
+                            .await;
                     }
                     () = sleep(pause) => {}
                 }
                 advance(&mut life, TaskState::Accepted);
+                ctx.tasks.update(&id, |e| {
+                    e.state = TaskState::Accepted;
+                    e.next_attempt_at = None;
+                });
             }
         }
     }
+}
+
+/// Completes `grace` after a cancel request; never for shutdown, whose
+/// timeout and grace the drain enforces (rule 2.3.14).
+async fn forced_abort(
+    cancel: &CancellationToken,
+    tasks: &TaskRegistry,
+    id: &TaskId,
+    grace: Duration,
+) {
+    cancel.cancelled().await;
+    if tasks.cancel_reason(id) != FinishReason::CancelledByUser {
+        pending::<()>().await;
+    }
+    sleep(grace).await;
+}
+
+/// The final state or defer: logged, taken out of the registry and acked
+/// unless deferred or cancelled by shutdown (rule 2.3.9, spec 2.1.2.15 p. 8).
+async fn finish<S: Source, C>(
+    ctx: &ExecCtx<S, C>,
+    life: &mut Lifecycle,
+    id: &TaskId,
+    attempt: u32,
+    receipt: S::Receipt,
+    ack_later: bool,
+    (state, reason): (TaskState, Option<FinishReason>),
+) -> TaskEnd {
+    advance(life, state);
+    log_outcome(&ctx.queue, id, attempt, state, reason.as_ref());
+    ctx.tasks.remove(id);
+    let acknowledged_by_defer = state == TaskState::Deferred;
+    let cancelled_by_shutdown = reason == Some(FinishReason::CancelledByShutdown);
+    if ack_later
+        && !acknowledged_by_defer
+        && !cancelled_by_shutdown
+        && let Err(e) = ctx.source.ack(receipt).await
+    {
+        let _ = ctx.ack_errors.send(e.to_string());
+    }
+    TaskEnd::Finished
 }
 
 /// One attempt in its span; panics and service errors are outcomes already.
@@ -707,19 +828,21 @@ where
 
 /// A task cancelled by shutdown while still waiting for a slot or a pool:
 /// "Accepted" → "Cancelled", no ack (scenario 2.2.7).
-fn cancel_waiting<S: Source, C, Args>(
+fn cancel_waiting<S: Source, C>(
     ctx: &ExecCtx<S, C>,
     life: &mut Lifecycle,
-    task: &Task<Args>,
+    id: &TaskId,
+    attempt: u32,
 ) -> TaskEnd {
     advance(life, TaskState::Cancelled);
     log_outcome(
         &ctx.queue,
-        task.id(),
-        task.attempt(),
+        id,
+        attempt,
         TaskState::Cancelled,
         Some(&FinishReason::CancelledByShutdown),
     );
+    ctx.tasks.remove(id);
     TaskEnd::CancelledWaiting
 }
 

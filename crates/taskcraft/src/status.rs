@@ -140,7 +140,6 @@ pub struct TaskStatus {
 
 impl TaskStatus {
     /// A status with only the always-present fields set.
-    #[allow(dead_code)] // built by the task registry in a later change
     pub(crate) fn new(id: TaskId, state: TaskState, attempt: u32, retries: u32) -> Self {
         Self {
             id,
@@ -153,6 +152,19 @@ impl TaskStatus {
             reason: None,
             owner: None,
         }
+    }
+
+    /// The same status with its times set.
+    pub(crate) fn with_times(
+        mut self,
+        accepted_at: Option<SystemTime>,
+        attempt_started_at: Option<SystemTime>,
+        next_attempt_at: Option<SystemTime>,
+    ) -> Self {
+        self.accepted_at = accepted_at;
+        self.attempt_started_at = attempt_started_at;
+        self.next_attempt_at = next_attempt_at;
+        self
     }
 
     /// The task id.

@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use serde::de::DeserializeOwned;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::MetadataError;
 use crate::metadata::MetadataRegistry;
@@ -60,22 +61,37 @@ impl fmt::Debug for SharedData {
 }
 
 /// What a handler is called with: the task, the metadata registry to parse
-/// its metadata, and the queue's shared data.
+/// its metadata, the queue's shared data and the task's cancel flag.
 #[derive(Debug)]
 pub struct TaskRequest<Args> {
     task: Task<Args>,
     registry: Arc<MetadataRegistry>,
     shared: Arc<SharedData>,
+    cancel: CancellationToken,
 }
 
 impl<Args> TaskRequest<Args> {
-    /// A request for `task`.
+    /// A request for `task`, with a cancel flag that is never set.
     pub fn new(task: Task<Args>, registry: Arc<MetadataRegistry>, shared: Arc<SharedData>) -> Self {
         Self {
             task,
             registry,
             shared,
+            cancel: CancellationToken::new(),
         }
+    }
+
+    /// The same request with the task's cancel flag.
+    #[must_use]
+    pub fn with_cancel(mut self, cancel: CancellationToken) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    /// The task's cancel flag.
+    #[must_use]
+    pub fn cancel_token(&self) -> &CancellationToken {
+        &self.cancel
     }
 
     /// The task.
@@ -133,7 +149,7 @@ impl From<Rejection> for Outcome {
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be a handler parameter",
     label = "not extractable from a task",
-    note = "handler parameters after the arguments must implement `FromTask`: Meta<T>, Option<Meta<T>>, Attempt, TaskId, Data<T>"
+    note = "handler parameters after the arguments must implement `FromTask`: Meta<T>, Option<Meta<T>>, Attempt, TaskId, Data<T>, Cancel"
 )]
 pub trait FromTask<Args>: Sized {
     /// Extracts the value.
@@ -223,6 +239,31 @@ impl<Args> FromTask<Args> for TaskId {
     }
 }
 
+/// The task's cancel flag, set by a cancel request or by shutdown (rule
+/// 2.3.15). A handler that checks it can stop early; one that does not is
+/// aborted when the queue's cancel grace runs out.
+#[derive(Debug, Clone)]
+pub struct Cancel(pub CancellationToken);
+
+impl Cancel {
+    /// Whether cancellation was requested.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.0.is_cancelled()
+    }
+
+    /// Completes once cancellation is requested.
+    pub async fn cancelled(&self) {
+        self.0.cancelled().await;
+    }
+}
+
+impl<Args> FromTask<Args> for Cancel {
+    fn from_task(request: &TaskRequest<Args>) -> Result<Self, Rejection> {
+        Ok(Self(request.cancel.clone()))
+    }
+}
+
 /// A shared value of type `T` registered with the queue.
 #[derive(Debug)]
 pub struct Data<T>(pub Arc<T>);
@@ -270,7 +311,7 @@ impl<Args, T: Send + Sync + 'static> FromTask<Args> for Data<T> {
     message = "`{Self}` is not a taskcraft handler",
     label = "not a handler function",
     note = "a handler is `async fn(Args, X1, …, Xn) -> R` with at most 8 extra parameters",
-    note = "every extra parameter must implement `FromTask`: Meta<T>, Option<Meta<T>>, Attempt, TaskId, Data<T>",
+    note = "every extra parameter must implement `FromTask`: Meta<T>, Option<Meta<T>>, Attempt, TaskId, Data<T>, Cancel",
     note = "`R` must be (), Outcome, Result<(), TaskError> or Result<Outcome, TaskError>",
     note = "the function must be Clone + Send + Sync + 'static and its future Send"
 )]
