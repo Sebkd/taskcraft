@@ -14,6 +14,13 @@ use crate::error::{ConfigError, MetadataError};
 /// Name reserved by the library for the W3C trace context of a task.
 pub const TRACE_PARENT: &str = "trace_parent";
 
+/// The W3C `traceparent` of the code that pushed a task (spec 2.12, 4.4.1).
+/// Every registry knows it under [`TRACE_PARENT`]; the attempt span carries
+/// it in its `trace_parent` field.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct TraceParent(pub String);
+
 /// A stored metadata value, cloneable and inspectable behind a trait object.
 trait MetaValue: Any + Send + Sync {
     fn clone_box(&self) -> Box<dyn MetaValue>;
@@ -183,17 +190,27 @@ fn encode_as<T: Serialize + 'static>(value: &dyn MetaValue) -> Result<Value, ser
 /// assert_eq!(read_back.resolve::<Priority>(&registry)?, Some(Priority(5)));
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct MetadataRegistry {
     by_type: HashMap<TypeId, Entry>,
     by_name: HashMap<&'static str, TypeId>,
 }
 
 impl MetadataRegistry {
-    /// An empty registry.
+    /// A registry that knows only [`TraceParent`].
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        let id = TypeId::of::<TraceParent>();
+        Self {
+            by_type: HashMap::from([(
+                id,
+                Entry {
+                    name: TRACE_PARENT,
+                    encode: encode_as::<TraceParent>,
+                },
+            )]),
+            by_name: HashMap::from([(TRACE_PARENT, id)]),
+        }
     }
 
     /// Registers `T` under a stable name.
@@ -245,7 +262,7 @@ impl MetadataRegistry {
     /// take only such names (spec 2.12).
     #[must_use]
     pub fn is_registered(&self, name: &str) -> bool {
-        name == TRACE_PARENT || self.by_name.contains_key(name)
+        self.by_name.contains_key(name)
     }
 
     /// Encodes metadata as a JSON object of stable name → value (spec 2.7.2).
@@ -288,6 +305,12 @@ impl MetadataRegistry {
             typed: HashMap::new(),
             raw: encoded.into_iter().collect(),
         }
+    }
+}
+
+impl Default for MetadataRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -345,6 +368,20 @@ mod tests {
             .register::<String>(TRACE_PARENT)
             .unwrap_err();
         assert_eq!(err.to_string(), "reserved metadata name: trace_parent");
+    }
+
+    #[test]
+    fn trace_parent_is_known_to_every_registry() {
+        let registry = registry();
+        let mut meta = Metadata::new();
+        meta.insert(TraceParent("00-abc-def-01".into()));
+        let encoded = registry.encode(&meta).unwrap();
+        assert_eq!(encoded[TRACE_PARENT], "00-abc-def-01");
+        let read = registry.decode(encoded);
+        assert_eq!(
+            read.resolve::<TraceParent>(&registry).unwrap(),
+            Some(TraceParent("00-abc-def-01".into()))
+        );
     }
 
     #[test]

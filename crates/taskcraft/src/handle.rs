@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::codec::{Codec, CodecError};
+use crate::observe::{Event, ObserverCell, observers_of};
 use crate::outcome::BoxError;
 use crate::registry::TaskRegistry;
 use crate::source::{AckOverrideUnsupported, PushError, PushResult, Source};
@@ -64,16 +65,24 @@ pub struct QueueHandle<S: Source, C, Args> {
     source: Arc<S>,
     codec: Arc<C>,
     tasks: Arc<TaskRegistry>,
+    observers: ObserverCell,
     _args: PhantomData<fn(Args)>,
 }
 
 impl<S: Source, C, Args> QueueHandle<S, C, Args> {
-    pub(crate) fn new(name: &str, source: Arc<S>, codec: Arc<C>, tasks: Arc<TaskRegistry>) -> Self {
+    pub(crate) fn new(
+        name: &str,
+        source: Arc<S>,
+        codec: Arc<C>,
+        tasks: Arc<TaskRegistry>,
+        observers: ObserverCell,
+    ) -> Self {
         Self {
             name: name.into(),
             source,
             codec,
             tasks,
+            observers,
             _args: PhantomData,
         }
     }
@@ -156,7 +165,13 @@ impl<S: Source, C: Codec<Args, S::Message>, Args> QueueHandle<S, C, Args> {
         }
         let message = self.codec.encode(task)?;
         match self.source.push(&id, message).await {
-            Ok(PushResult::Stored) => Ok(PushOutcome::Enqueued { id }),
+            Ok(PushResult::Stored) => {
+                observers_of(&self.observers).emit(&Event::Pushed {
+                    queue: &self.name,
+                    task_id: &id,
+                });
+                Ok(PushOutcome::Enqueued { id })
+            }
             Ok(PushResult::Duplicate) => {
                 let state = self.tasks.state(&id).unwrap_or(TaskState::Queued);
                 Ok(PushOutcome::AlreadyRunning { id, state })
@@ -179,6 +194,7 @@ impl<S: Source, C, Args> Clone for QueueHandle<S, C, Args> {
             source: Arc::clone(&self.source),
             codec: Arc::clone(&self.codec),
             tasks: Arc::clone(&self.tasks),
+            observers: Arc::clone(&self.observers),
             _args: PhantomData,
         }
     }

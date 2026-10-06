@@ -15,6 +15,7 @@ use tracing::{error, info};
 use crate::codec::Codec;
 use crate::error::{ConfigError, RecoveryError};
 use crate::handler::{BoxFuture, TaskRequest};
+use crate::observe::{Observer, Observers};
 use crate::outcome::{BoxError, Outcome};
 use crate::queue::Queue;
 use crate::registry::TaskRegistry;
@@ -145,6 +146,7 @@ pub struct Monitor {
     names: HashSet<String>,
     pools: HashMap<String, (u32, Arc<Semaphore>)>,
     queues: Vec<Registered>,
+    observers: Vec<Arc<dyn Observer>>,
 }
 
 impl Monitor {
@@ -161,6 +163,7 @@ impl Monitor {
             names: HashSet::new(),
             pools: HashMap::new(),
             queues: Vec::new(),
+            observers: Vec::new(),
         }
     }
 
@@ -218,6 +221,16 @@ impl Monitor {
         Ok(self)
     }
 
+    /// Adds an observer of every event of this monitor's queues (rule
+    /// 2.3.22), such as `MetricsObserver` with the `metrics` feature. Add
+    /// observers before registering queues: a queue gets the observers added
+    /// so far.
+    #[must_use]
+    pub fn observer(mut self, observer: impl Observer) -> Self {
+        self.observers.push(Arc::new(observer));
+        self
+    }
+
     /// Registers a queue.
     ///
     /// # Errors
@@ -258,12 +271,16 @@ impl Monitor {
                 return Err(ConfigError::PermitsExceedPool { name: pool.clone() });
             }
             claims.push(PoolClaim {
+                name: pool.as_str().into(),
+                size: *size,
                 semaphore: Arc::clone(semaphore),
                 permits,
             });
         }
         self.names.insert(name.clone());
         let mut queue = queue;
+        // A queue is registered once: it keeps this monitor's observers.
+        let _ = queue.observers.set(Observers::new(self.observers.clone()));
         let hook = queue.recovery.take();
         let tasks = Arc::clone(&queue.tasks);
         let queue_name = name.clone();
@@ -412,6 +429,7 @@ impl fmt::Debug for Monitor {
             .field("restart", &self.restart)
             .field("queues", &self.names)
             .field("pools", &self.pools.keys().collect::<Vec<_>>())
+            .field("observers", &self.observers.len())
             .finish()
     }
 }
