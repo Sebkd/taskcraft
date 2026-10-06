@@ -7,6 +7,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use tokio::time::Instant;
 
+use crate::error::ConfigError;
 use crate::source::{
     AckPointSupport, Capabilities, CloseReason, DeferError, Polled, PushError, PushResult, Source,
     WakeHandle, WakeSignal, Withdrawal,
@@ -43,15 +44,17 @@ impl<Args> InMemorySource<Args> {
 
     /// A source holding at most `capacity` tasks.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// If `capacity` is zero.
-    #[must_use]
-    pub fn new(capacity: usize) -> Self {
-        assert!(
-            capacity >= 1,
-            "in-memory source capacity must be at least 1"
-        );
+    /// [`ConfigError::InvalidCapacity`] when `capacity` is zero (spec 2.10).
+    pub fn new(capacity: usize) -> Result<Self, ConfigError> {
+        if capacity == 0 {
+            return Err(ConfigError::InvalidCapacity);
+        }
+        Ok(Self::with_capacity(capacity))
+    }
+
+    fn with_capacity(capacity: usize) -> Self {
         Self {
             state: Mutex::new(State {
                 ready: VecDeque::new(),
@@ -94,7 +97,7 @@ impl<Args> InMemorySource<Args> {
 
 impl<Args> Default for InMemorySource<Args> {
     fn default() -> Self {
-        Self::new(Self::DEFAULT_CAPACITY)
+        Self::with_capacity(Self::DEFAULT_CAPACITY)
     }
 }
 
@@ -231,9 +234,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn zero_capacity_is_a_config_error() {
+        let error = InMemorySource::<u32>::new(0).unwrap_err();
+        assert_eq!(error.to_string(), "capacity must be at least 1");
+    }
+
     #[tokio::test]
     async fn capacity_counts_every_held_task() {
-        let source = InMemorySource::new(2);
+        let source = InMemorySource::new(2).unwrap();
         assert_eq!(push(&source, "a").await, PushResult::Stored);
         assert_eq!(push(&source, "b").await, PushResult::Stored);
         assert_eq!(push(&source, "c").await, PushResult::Full);
@@ -248,7 +257,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_ids_are_refused_until_acked() {
-        let source = InMemorySource::new(10);
+        let source = InMemorySource::new(10).unwrap();
         assert_eq!(push(&source, "a").await, PushResult::Stored);
         assert_eq!(push(&source, "a").await, PushResult::Duplicate);
         let (_, receipt) = take(&source).await;
@@ -260,7 +269,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_is_not_closed() {
-        let source = InMemorySource::<u32>::new(10);
+        let source = InMemorySource::<u32>::new(10).unwrap();
         for _ in 0..1000 {
             assert!(matches!(source.poll().await.unwrap(), Polled::Empty));
         }
@@ -276,7 +285,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn deferred_task_returns_when_due() {
-        let source = InMemorySource::new(10);
+        let source = InMemorySource::new(10).unwrap();
         assert_eq!(push(&source, "a").await, PushResult::Stored);
         let (delivered, receipt) = take(&source).await;
         let at = Instant::now() + Duration::from_secs(60);
@@ -298,7 +307,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn remove_takes_out_ready_and_deferred_tasks_only() {
-        let source = InMemorySource::new(10);
+        let source = InMemorySource::new(10).unwrap();
         let (a, b, c) = (TaskId::new("a"), TaskId::new("b"), TaskId::new("c"));
         for id in ["a", "b", "c"] {
             assert_eq!(push(&source, id).await, PushResult::Stored);
@@ -333,7 +342,7 @@ mod tests {
 
     #[tokio::test]
     async fn push_wakes_subscribers() {
-        let source = InMemorySource::new(10);
+        let source = InMemorySource::new(10).unwrap();
         let mut signal = source.subscribe().unwrap();
         signal.mark_seen();
         assert_eq!(push(&source, "a").await, PushResult::Stored);

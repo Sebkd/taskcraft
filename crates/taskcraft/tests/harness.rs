@@ -229,7 +229,7 @@ impl Source for SingleWakerSource {
 #[tokio::test(start_paused = true)]
 async fn wake_reaches_every_subscriber() {
     let id = TaskId::new("w");
-    let memory = InMemorySource::new(10);
+    let memory = InMemorySource::new(10).unwrap();
     scenarios::wake_reaches_every_subscriber(&memory, &id, Task::new(1).with_id(id.clone()))
         .await
         .unwrap();
