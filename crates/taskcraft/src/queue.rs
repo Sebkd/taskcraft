@@ -1,6 +1,7 @@
 //! A queue: a source, a codec and a handler with their settings (spec 2.5,
 //! 2.8).
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -12,7 +13,7 @@ use crate::handler::SharedData;
 use crate::metadata::MetadataRegistry;
 use crate::poll::PollStrategy;
 use crate::source::Source;
-use crate::task::AckPoint;
+use crate::task::{AckPoint, Task};
 
 /// What the dead-letter hook receives: a message that could not be decoded.
 #[derive(Debug)]
@@ -41,10 +42,32 @@ impl<M> Clone for DeadLetterHook<M> {
     }
 }
 
+type RejectFn<Args> = Arc<dyn Fn(Task<Args>) + Send + Sync>;
+
+/// What happens to an accepted task when no slot is free (rule 2.3.7).
+pub(crate) enum OverflowPolicy<Args> {
+    /// Wait for a slot; at most `limit` tasks wait (default: the concurrency
+    /// limit).
+    Wait { limit: Option<usize> },
+    /// Refuse at once and hand the task to the hook.
+    Reject(RejectFn<Args>),
+}
+
+impl<Args> fmt::Debug for OverflowPolicy<Args> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Wait { limit } => f.debug_struct("Wait").field("limit", limit).finish(),
+            Self::Reject(_) => f.write_str("Reject"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct QueueConfig {
     pub(crate) name: String,
     pub(crate) concurrency: usize,
+    /// Pool name → permits taken per attempt; ordered by name (rule 2.3.8).
+    pub(crate) pools: BTreeMap<String, u32>,
     pub(crate) ack_point: AckPoint,
     pub(crate) poll: PollStrategy,
     pub(crate) cancel_grace: Duration,
@@ -61,6 +84,7 @@ pub struct Queue<S: Source, C, Svc, Args> {
     pub(crate) registry: Arc<MetadataRegistry>,
     pub(crate) shared: Arc<SharedData>,
     pub(crate) dead_letter: Option<DeadLetterHook<S::Message>>,
+    pub(crate) overflow: OverflowPolicy<Args>,
     pub(crate) _args: PhantomData<fn() -> Args>,
 }
 
@@ -79,6 +103,7 @@ impl<S: Source, C: Codec<Args, S::Message>, Svc, Args> Queue<S, C, Svc, Args> {
                 config: QueueConfig {
                     name: name.into(),
                     concurrency: 1,
+                    pools: BTreeMap::new(),
                     ack_point: AckPoint::OnAccept,
                     poll: PollStrategy::default(),
                     cancel_grace: Duration::from_secs(30),
@@ -89,6 +114,7 @@ impl<S: Source, C: Codec<Args, S::Message>, Svc, Args> Queue<S, C, Svc, Args> {
                 registry: Arc::new(MetadataRegistry::new()),
                 shared: Arc::new(SharedData::new()),
                 dead_letter: None,
+                overflow: OverflowPolicy::Wait { limit: None },
                 _args: PhantomData,
             },
         }
@@ -108,6 +134,7 @@ impl<S: Source, C, Svc, Args> fmt::Debug for Queue<S, C, Svc, Args> {
         f.debug_struct("Queue")
             .field("config", &self.config)
             .field("dead_letter", &self.dead_letter.is_some())
+            .field("overflow", &self.overflow)
             .finish_non_exhaustive()
     }
 }
@@ -122,6 +149,35 @@ impl<S: Source, C, Svc, Args> QueueBuilder<S, C, Svc, Args> {
     /// How many tasks run at once. Default 1.
     pub fn concurrency(mut self, limit: usize) -> Self {
         self.queue.config.concurrency = limit;
+        self
+    }
+
+    /// When no slot is free, wait for one; at most `limit` tasks wait, and
+    /// the worker stops polling while the waiting room is full. This is the
+    /// default, with the limit equal to the concurrency limit (spec 2.8).
+    pub fn wait_limit(mut self, limit: usize) -> Self {
+        self.queue.overflow = OverflowPolicy::Wait { limit: Some(limit) };
+        self
+    }
+
+    /// When no slot is free, refuse the task at once: `hook` gets it to
+    /// answer the sender, and the message is acknowledged (scenario 2.2.1).
+    ///
+    /// The hook runs in the intake loop: build the answer and send it from a
+    /// spawned task if sending takes time.
+    pub fn reject_with<F>(mut self, hook: F) -> Self
+    where
+        F: Fn(Task<Args>) + Send + Sync + 'static,
+    {
+        self.queue.overflow = OverflowPolicy::Reject(Arc::new(hook));
+        self
+    }
+
+    /// Takes `permits` permits of the monitor's pool `name` for every attempt
+    /// (rule 2.3.8). The pool must exist in the monitor the queue is
+    /// registered with.
+    pub fn pool(mut self, name: impl Into<String>, permits: u32) -> Self {
+        self.queue.config.pools.insert(name.into(), permits);
         self
     }
 

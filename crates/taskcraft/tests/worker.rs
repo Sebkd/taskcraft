@@ -2,7 +2,6 @@
 
 #![cfg(feature = "test-util")]
 
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -18,71 +17,11 @@ use taskcraft::{
 use taskcraft::{Queue, QueueBuilder};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
-use tracing::field::{Field, Visit};
-use tracing_subscriber::Layer;
-use tracing_subscriber::layer::{Context, SubscriberExt};
+
+mod common;
+use common::Captured;
 
 const SEC: Duration = Duration::from_secs(1);
-
-// ---------------------------------------------------------------- log capture
-
-#[derive(Debug, Clone)]
-struct Record {
-    level: tracing::Level,
-    fields: BTreeMap<String, String>,
-}
-
-impl Record {
-    fn is(&self, event: &str, action: &str) -> bool {
-        self.fields.get("event").map(String::as_str) == Some(event)
-            && self.fields.get("action").map(String::as_str) == Some(action)
-    }
-}
-
-#[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<Record>>>);
-
-impl Captured {
-    fn records(&self) -> Vec<Record> {
-        self.0.lock().unwrap().clone()
-    }
-
-    fn count(&self, event: &str, action: &str) -> usize {
-        self.records()
-            .iter()
-            .filter(|r| r.is(event, action))
-            .count()
-    }
-
-    /// Installs the capture for the current thread; tokio tests run on one.
-    fn install(&self) -> tracing::subscriber::DefaultGuard {
-        let subscriber = tracing_subscriber::registry().with(self.clone());
-        tracing::subscriber::set_default(subscriber)
-    }
-}
-
-struct Fields<'a>(&'a mut BTreeMap<String, String>);
-
-impl Visit for Fields<'_> {
-    fn record_str(&mut self, field: &Field, value: &str) {
-        self.0.insert(field.name().to_owned(), value.to_owned());
-    }
-
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        self.0.insert(field.name().to_owned(), format!("{value:?}"));
-    }
-}
-
-impl<S: tracing::Subscriber> Layer<S> for Captured {
-    fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
-        let mut fields = BTreeMap::new();
-        event.record(&mut Fields(&mut fields));
-        self.0.lock().unwrap().push(Record {
-            level: *event.metadata().level(),
-            fields,
-        });
-    }
-}
 
 // ------------------------------------------------------------------- helpers
 

@@ -44,6 +44,27 @@ pub enum ConfigError {
         /// What is wrong, worded as in the configuration rules.
         reason: &'static str,
     },
+    /// A queue requires a pool the monitor does not have.
+    #[error("unknown pool: {name}")]
+    UnknownPool {
+        /// The pool name.
+        name: String,
+    },
+    /// A queue requires more permits than the pool has.
+    #[error("permits exceed pool size: {name}")]
+    PermitsExceedPool {
+        /// The pool name.
+        name: String,
+    },
+    /// A pool declared with size 0, declared twice, or required with 0
+    /// permits.
+    #[error("invalid pool {name}: {reason}")]
+    InvalidPool {
+        /// The pool name.
+        name: String,
+        /// What is wrong.
+        reason: &'static str,
+    },
     /// A poll strategy with a zero duration, a minimum above its maximum or
     /// an empty composition.
     #[error("invalid poll strategy: {reason}")]
