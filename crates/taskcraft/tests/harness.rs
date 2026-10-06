@@ -1,6 +1,8 @@
 //! The harness scenarios against a reference worker (they must pass) and
 //! against stubs that each carry one known defect (they must fail).
 
+// Test helpers may unwrap and panic (invariant 1.3.19 covers library code).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![cfg(feature = "test-util")]
 
 use std::sync::{Arc, Mutex};

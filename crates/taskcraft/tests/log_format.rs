@@ -1,5 +1,7 @@
 //! What an application sees in the log (spec 2.9, 4.4.1).
 
+// Test helpers may unwrap and panic (invariant 1.3.19 covers library code).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![cfg(feature = "test-util")]
 
 use std::collections::BTreeSet;

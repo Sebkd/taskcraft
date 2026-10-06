@@ -4,6 +4,9 @@
 //! `TASKCRAFT_KAFKA_BROKERS` (for example `localhost:9092`), or they are
 //! skipped.
 
+// Test helpers may unwrap and panic (invariant 1.3.19 covers library code).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

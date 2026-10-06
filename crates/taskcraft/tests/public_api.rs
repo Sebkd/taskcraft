@@ -1,5 +1,8 @@
 //! The task model used only through the crate root, as a consumer would.
 
+// Test helpers may unwrap and panic (invariant 1.3.19 covers library code).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use serde::{Deserialize, Serialize};
 use taskcraft::{
     AckPoint, Lifecycle, MetadataRegistry, PushOutcome, RejectReason, Task, TaskState,

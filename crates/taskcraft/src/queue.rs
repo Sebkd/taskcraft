@@ -64,7 +64,7 @@ pub enum TimeoutOutcome {
     Retry,
 }
 
-type RejectFn<Args> = Arc<dyn Fn(Task<Args>) + Send + Sync>;
+pub(crate) type RejectFn<Args> = Arc<dyn Fn(Task<Args>) + Send + Sync>;
 
 /// What happens to an accepted task when no slot is free (rule 2.3.7).
 pub(crate) enum OverflowPolicy<Args> {

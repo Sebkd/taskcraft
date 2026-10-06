@@ -1,6 +1,9 @@
 //! The source contract implemented from outside the crate, the way a user or
 //! a backend crate would, and the in-memory source under concurrency.
 
+// Test helpers may unwrap and panic (invariant 1.3.19 covers library code).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use std::collections::{HashSet, VecDeque};
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};

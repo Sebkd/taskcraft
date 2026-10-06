@@ -1,5 +1,7 @@
 //! Helpers shared by the integration tests.
 
+// Test helpers may unwrap and panic (invariant 1.3.19 covers library code).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![allow(dead_code, unreachable_pub)]
 
 use std::cell::RefCell;

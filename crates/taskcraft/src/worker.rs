@@ -22,7 +22,7 @@ use crate::monitor::{QueueReport, StopReason, WorkerContext};
 use crate::observe::{AttemptEnd, Event, Observers, Occupancy, Waiting, observers_of};
 use crate::outcome::{BoxError, Outcome};
 use crate::poll::{Poller, Wakeup};
-use crate::queue::{DeadLetter, OverflowPolicy, Queue, TimeoutOutcome};
+use crate::queue::{DeadLetter, OverflowPolicy, Queue, RejectFn, TimeoutOutcome};
 use crate::registry::TaskRegistry;
 use crate::retry::RetryPolicy;
 use crate::source::{Polled, Source};
@@ -95,11 +95,12 @@ enum Slot {
 }
 
 /// What the intake took before polling.
-enum Gate {
+enum Gate<Args> {
     Slot(OwnedSemaphorePermit),
     Waiting(OwnedSemaphorePermit),
-    /// Reject policy: poll without reserving anything.
-    Free,
+    /// Reject policy: poll without reserving anything; refuse with the hook
+    /// when no slot is free.
+    Free(RejectFn<Args>),
 }
 
 /// What every execution of a queue shares.
@@ -302,18 +303,22 @@ where
 
         // Rule 2.3.7: with "wait", poll only when a slot or a place in the
         // waiting room is free; with "reject", always poll.
-        let gate = if reject.is_some() {
-            Gate::Free
+        // The semaphores are never closed; if one were, the worker stops as
+        // failed instead of panicking (invariant 1.3.19).
+        let gate = if let Some(hook) = &reject {
+            Gate::Free(Arc::clone(hook))
         } else {
             tokio::select! {
                 biased;
                 () = stop.cancelled() => break 'intake StopReason::Shutdown,
-                permit = Arc::clone(&slots).acquire_owned() => {
-                    Gate::Slot(permit.expect("slots are never closed"))
-                }
-                place = Arc::clone(&waiting_room).acquire_owned() => {
-                    Gate::Waiting(place.expect("the waiting room is never closed"))
-                }
+                permit = Arc::clone(&slots).acquire_owned() => match permit {
+                    Ok(permit) => Gate::Slot(permit),
+                    Err(_) => break 'intake StopReason::Failed("slot semaphore closed".to_owned()),
+                },
+                place = Arc::clone(&waiting_room).acquire_owned() => match place {
+                    Ok(place) => Gate::Waiting(place),
+                    Err(_) => break 'intake StopReason::Failed("waiting room closed".to_owned()),
+                },
             }
         };
         if let Some(signal) = wake.as_mut() {
@@ -433,18 +438,17 @@ where
                             slots: Arc::clone(&slots),
                         },
                     },
-                    Gate::Free => {
+                    Gate::Free(hook) => {
                         if let Ok(permit) = Arc::clone(&slots).try_acquire_owned() {
                             Slot::Held(permit)
                         } else {
-                            let hook = reject.as_ref().expect("Free gate means reject policy");
                             tasks.remove(task.id());
                             observers.emit(&Event::Rejected {
                                 queue: &name,
                                 task_id: task.id(),
                                 reason: &FinishReason::RejectedOverflow,
                             });
-                            reject_task(&name, &**hook, task);
+                            reject_task(&name, &*hook, task);
                             if let Err(e) = source.ack(receipt).await {
                                 let _ = ack_errors.send(e.to_string());
                             }
@@ -705,7 +709,12 @@ where
                         return finish(&ctx, &mut life, &id, task.attempt(), receipt, ack_later, end)
                             .await;
                     }
-                    permit = slots.acquire_owned() => permit.expect("slots are never closed"),
+                    // Never closed; if it were, the task is cancelled as on
+                    // shutdown and delivered again (invariant 1.3.19).
+                    permit = slots.acquire_owned() => match permit {
+                        Ok(permit) => permit,
+                        Err(_) => return cancel_waiting(&ctx, &mut life, &id, task.attempt()),
+                    },
                 };
                 drop(place);
                 permit
@@ -725,7 +734,10 @@ where
                         .await;
                 }
                 permits = Arc::clone(&claim.semaphore).acquire_many_owned(claim.permits) => {
-                    permits.expect("pools are never closed")
+                    match permits {
+                        Ok(permits) => permits,
+                        Err(_) => return cancel_waiting(&ctx, &mut life, &id, task.attempt()),
+                    }
                 }
             };
             pool_permits.push(PoolHeld::new(claim, permits, &ctx.observers));
