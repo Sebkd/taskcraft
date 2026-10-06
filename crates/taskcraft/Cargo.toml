@@ -11,5 +11,11 @@ description = "Background task queue for Rust on tokio: three-way source polling
 keywords = ["queue", "background", "jobs", "tasks", "tokio"]
 categories = ["asynchronous", "concurrency"]
 
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
 [lints]
 workspace = true
