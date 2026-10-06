@@ -1171,6 +1171,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "readme-check"
+version = "0.1.0"
+dependencies = [
+ "metrics-exporter-prometheus",
+ "serde",
+ "sqlx",
+ "statecraft-fsm",
+ "taskcraft",
+ "taskcraft-kafka",
+ "taskcraft-postgres",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1634,7 +1649,7 @@ dependencies = [
 
 [[package]]
 name = "taskcraft"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "log",
  "metrics",
@@ -1654,7 +1669,7 @@ dependencies = [
 
 [[package]]
 name = "taskcraft-kafka"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "rdkafka",
  "serde",
@@ -1669,7 +1684,7 @@ dependencies = [
 
 [[package]]
 name = "taskcraft-postgres"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",

@@ -34,6 +34,10 @@
 //! # let _ = report;
 //! # Ok(()) }
 //! ```
+//!
+//! More: the [README](https://github.com/Sebkd/taskcraft/tree/master/crates/taskcraft-kafka#readme)
+//! and the [`kafka-consumer`](https://github.com/Sebkd/taskcraft/blob/master/crates/taskcraft-kafka/examples/kafka-consumer.rs)
+//! example.
 
 mod commits;
 mod message;

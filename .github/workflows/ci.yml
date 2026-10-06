@@ -75,9 +75,19 @@ jobs:
       # from the crates they point at.
       - name: Publish (dry run)
         run: |
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)
+          core_published=$(curl -s -o /dev/null -w '%{http_code}' \
+            -A "taskcraft-ci (github.com/Sebkd/taskcraft)" \
+            "https://crates.io/api/v1/crates/taskcraft/$version")
           for manifest in crates/*/Cargo.toml; do
             if grep -q '^publish = false' "$manifest"; then
               echo "skipped (publish = false): $manifest"
+              continue
+            fi
+            # A dry run builds against taskcraft from crates.io: the other
+            # packages can be checked only once this version of it is out.
+            if [ "$manifest" != crates/taskcraft/Cargo.toml ] && [ "$core_published" != 200 ]; then
+              echo "skipped until taskcraft $version is published: $manifest"
               continue
             fi
             cargo publish --dry-run --locked --manifest-path "$manifest"
