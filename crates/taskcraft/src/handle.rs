@@ -11,7 +11,9 @@ use crate::codec::{Codec, CodecError};
 use crate::observe::{Event, ObserverCell, observers_of};
 use crate::outcome::BoxError;
 use crate::registry::TaskRegistry;
-use crate::source::{AckOverrideUnsupported, PushError, PushResult, Source, Withdrawal};
+use crate::source::{
+    AckOverrideUnsupported, AckPointSupport, PushError, PushResult, Source, Withdrawal,
+};
 use crate::state::TaskState;
 use crate::status::{PushOutcome, RejectReason, TaskStatus};
 use crate::task::{Task, TaskId};
@@ -186,6 +188,17 @@ impl<S: Source, C: Codec<Args, S::Message>, Args> QueueHandle<S, C, Args> {
         let message = self.codec.encode(task)?;
         match self.source.push(&id, message).await {
             Ok(PushResult::Stored) => {
+                // The worker may have stopped intake during the write: a
+                // source that does not outlive the process would keep the
+                // task where nobody polls it (spec 2.1.2.1 step 1). A task
+                // store keeps it for the next run.
+                let durable = caps.ack_point_support() == AckPointSupport::Fixed;
+                if self.tasks.is_closing()
+                    && !durable
+                    && matches!(self.source.remove(&id).await, Ok(Withdrawal::Removed))
+                {
+                    return Err(PushTaskError::Stopping);
+                }
                 observers_of(&self.observers).emit(&Event::Pushed {
                     queue: &self.name,
                     task_id: &id,
