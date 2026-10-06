@@ -1,0 +1,16 @@
+# Infrastructure for the examples that need it:
+#   E-12 kafka-consumer       docker compose -f examples/docker-compose.yml up -d kafka
+#   E-13 durable-store,
+#   E-14 leases-failover      docker compose -f examples/docker-compose.yml up -d postgres
+# Stop with: docker compose -f examples/docker-compose.yml down
+services:
+  kafka:
+    image: apache/kafka:3.9.0
+    ports:
+      - "9092:9092"
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"

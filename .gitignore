@@ -8,3 +8,6 @@
 
 # Сборка
 /target/
+
+# The standalone example crate builds into its own target directory.
+/examples/axum-service/target

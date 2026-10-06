@@ -61,6 +61,11 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features
 
+      # E-11 lives outside the workspace; the workspace examples are linted
+      # by the clippy step above. Examples are built, never run, in CI.
+      - name: Example outside the workspace
+        run: cargo clippy --manifest-path examples/axum-service/Cargo.toml -- -D warnings
+
       - name: Docs
         run: cargo doc --workspace --no-deps --all-features
         env:

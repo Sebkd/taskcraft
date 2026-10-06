@@ -37,11 +37,17 @@ log = ["tracing/log"]
 # A real state machine for the runnable tests; never a normal dependency
 # (spec 1.3.14, change criterion 2).
 statecraft-fsm = { version = "0.2", features = ["tokio"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util", "signal"] }
 tower = { workspace = true, features = ["util", "timeout", "limit"] }
+# The Prometheus exporter of the observability example, without its HTTP server.
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
 log = "0.4"
 metrics-util = { version = "0.20", default-features = false, features = ["debugging"] }
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "json"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "json", "env-filter"] }
+
+[[example]]
+name = "observability"
+required-features = ["metrics"]
 
 [lints]
 workspace = true
