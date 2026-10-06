@@ -77,8 +77,12 @@ impl Drop for PoolHeld {
 
 /// How a task left the worker, for the shutdown report.
 enum TaskEnd {
-    /// Reached its outcome on its own.
+    /// Reached its outcome after intake ended: the shutdown or the closed
+    /// source found it at work.
     Finished,
+    /// Reached its outcome before intake ended; not in the report (spec
+    /// 2.7.6).
+    Before,
     /// Cancelled by shutdown while waiting for a slot or a pool.
     CancelledWaiting,
 }
@@ -125,6 +129,9 @@ struct ExecCtx<S: Source, C> {
     /// The source keeps task history: progress and final states are
     /// recorded (rule 2.3.9 p. 6).
     records: bool,
+    /// Set when intake ends, by the shutdown signal or a closed source:
+    /// outcomes from then on count in the shutdown report.
+    draining: CancellationToken,
 }
 
 /// Sleeps the restart delay unless stopped; returns `true` when stopped.
@@ -215,6 +222,7 @@ where
         shared,
         supports_defer: source.capabilities().supports_defer(),
         records: store,
+        draining: CancellationToken::new(),
         ack_errors: ack_errors.clone(),
         stop: ctx.stop.clone(),
         pools,
@@ -524,6 +532,7 @@ where
 
     // Pushes are refused from now on (rule 2.3.14 p. 3).
     tasks.set_closing();
+    exec.draining.cancel();
     if let Some(listener) = &listener {
         listener.abort();
     }
@@ -654,6 +663,7 @@ impl Counts {
     fn add(&mut self, joined: &Result<(tokio::task::Id, TaskEnd), tokio::task::JoinError>) {
         match joined {
             Ok((_, TaskEnd::CancelledWaiting)) => self.cancelled += 1,
+            Ok((_, TaskEnd::Before)) => {}
             Ok((_, TaskEnd::Finished)) | Err(_) => self.completed += 1,
         }
     }
@@ -1095,7 +1105,11 @@ async fn finish<S: Source, C>(
     {
         let _ = ctx.ack_errors.send(e.to_string());
     }
-    TaskEnd::Finished
+    if ctx.draining.is_cancelled() {
+        TaskEnd::Finished
+    } else {
+        TaskEnd::Before
+    }
 }
 
 /// One attempt in its span; panics and service errors are outcomes already.
