@@ -102,11 +102,14 @@ impl TaskRegistry {
     /// Sets the task's cancel flag with "cancelled by request" (rule 2.3.15)
     /// and returns its state; `None` when the task is not live.
     pub(crate) fn cancel(&self, id: &TaskId) -> Option<TaskState> {
+        self.cancel_with(id, FinishReason::CancelledByUser)
+    }
+
+    /// Sets the task's cancel flag with `reason`; the first reason stays.
+    pub(crate) fn cancel_with(&self, id: &TaskId, reason: FinishReason) -> Option<TaskState> {
         let mut inner = self.lock();
         let entry = inner.tasks.get_mut(id)?;
-        entry
-            .cancel_reason
-            .get_or_insert(FinishReason::CancelledByUser);
+        entry.cancel_reason.get_or_insert(reason);
         entry.cancel.cancel();
         Some(entry.state)
     }

@@ -139,8 +139,10 @@ pub struct TaskStatus {
 }
 
 impl TaskStatus {
-    /// A status with only the always-present fields set.
-    pub(crate) fn new(id: TaskId, state: TaskState, attempt: u32, retries: u32) -> Self {
+    /// A status with only the always-present fields set; sources that keep
+    /// task history build theirs from it.
+    #[must_use]
+    pub fn new(id: TaskId, state: TaskState, attempt: u32, retries: u32) -> Self {
         Self {
             id,
             state,
@@ -155,7 +157,8 @@ impl TaskStatus {
     }
 
     /// The same status with its times set.
-    pub(crate) fn with_times(
+    #[must_use]
+    pub fn with_times(
         mut self,
         accepted_at: Option<SystemTime>,
         attempt_started_at: Option<SystemTime>,
@@ -164,6 +167,21 @@ impl TaskStatus {
         self.accepted_at = accepted_at;
         self.attempt_started_at = attempt_started_at;
         self.next_attempt_at = next_attempt_at;
+        self
+    }
+
+    /// The same status with the reason of a failed, panicked or cancelled
+    /// task.
+    #[must_use]
+    pub fn with_reason(mut self, reason: FinishReason) -> Self {
+        self.reason = Some(reason);
+        self
+    }
+
+    /// The same status with the owning process.
+    #[must_use]
+    pub fn with_owner(mut self, owner: impl Into<String>) -> Self {
+        self.owner = Some(owner.into());
         self
     }
 

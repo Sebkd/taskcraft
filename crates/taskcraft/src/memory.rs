@@ -9,7 +9,7 @@ use tokio::time::Instant;
 
 use crate::source::{
     AckPointSupport, Capabilities, CloseReason, DeferError, Polled, PushError, PushResult, Source,
-    WakeHandle, WakeSignal,
+    WakeHandle, WakeSignal, Withdrawal,
 };
 use crate::task::{Task, TaskId};
 
@@ -182,16 +182,17 @@ impl<Args: Send + 'static> Source for InMemorySource<Args> {
         Ok(PushResult::Stored)
     }
 
-    async fn remove(&self, id: &TaskId) -> Result<bool, Infallible> {
+    async fn remove(&self, id: &TaskId) -> Result<Withdrawal, Infallible> {
         let mut state = self.lock();
         let before = state.ready.len() + state.deferred.len();
         state.ready.retain(|task| task.id() != id);
         state.deferred.retain(|_, task| task.id() != id);
         let removed = state.ready.len() + state.deferred.len() < before;
-        if removed {
-            state.held.remove(id);
+        if !removed {
+            return Ok(Withdrawal::NotFound);
         }
-        Ok(removed)
+        state.held.remove(id);
+        Ok(Withdrawal::Removed)
     }
 
     async fn defer(
@@ -304,14 +305,26 @@ mod tests {
         }
         let (delivered, receipt) = take(&source).await;
         assert_eq!(delivered.id(), &a);
-        assert!(!source.remove(&a).await.unwrap(), "handed out");
+        assert_eq!(
+            source.remove(&a).await.unwrap(),
+            Withdrawal::NotFound,
+            "handed out"
+        );
 
         let (later, receipt_b) = take(&source).await;
         let at = Instant::now() + Duration::from_secs(60);
         source.defer(receipt_b, later, at).await.unwrap();
-        assert!(source.remove(&b).await.unwrap(), "deferred");
-        assert!(source.remove(&c).await.unwrap(), "ready");
-        assert!(!source.remove(&c).await.unwrap());
+        assert_eq!(
+            source.remove(&b).await.unwrap(),
+            Withdrawal::Removed,
+            "deferred"
+        );
+        assert_eq!(
+            source.remove(&c).await.unwrap(),
+            Withdrawal::Removed,
+            "ready"
+        );
+        assert_eq!(source.remove(&c).await.unwrap(), Withdrawal::NotFound);
         assert_eq!(push(&source, "c").await, PushResult::Stored, "id is free");
 
         source.ack(receipt).await.unwrap();

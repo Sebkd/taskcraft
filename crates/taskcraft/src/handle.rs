@@ -11,7 +11,7 @@ use crate::codec::{Codec, CodecError};
 use crate::observe::{Event, ObserverCell, observers_of};
 use crate::outcome::BoxError;
 use crate::registry::TaskRegistry;
-use crate::source::{AckOverrideUnsupported, PushError, PushResult, Source};
+use crate::source::{AckOverrideUnsupported, PushError, PushResult, Source, Withdrawal};
 use crate::state::TaskState;
 use crate::status::{PushOutcome, RejectReason, TaskStatus};
 use crate::task::{Task, TaskId};
@@ -106,6 +106,21 @@ impl<S: Source, C, Args> QueueHandle<S, C, Args> {
         self.tasks.status(id)
     }
 
+    /// The status of a task wherever it is: this process's live tasks
+    /// first, then the source — a task store also knows tasks of other
+    /// processes and finished ones (spec 2.1.2.14).
+    ///
+    /// # Errors
+    ///
+    /// The source failed, for example the database is unreachable (spec
+    /// 2.11.3).
+    pub async fn fetch_status(&self, id: &TaskId) -> Result<Option<TaskStatus>, BoxError> {
+        if let Some(status) = self.tasks.status(id) {
+            return Ok(Some(status));
+        }
+        self.source.status(id).await.map_err(Into::into)
+    }
+
     /// Cancels a task: at once when it waits, cooperatively when it runs
     /// (rule 2.3.15). Repeating the request changes nothing.
     pub async fn cancel(&self, id: &TaskId) -> CancelOutcome {
@@ -113,8 +128,10 @@ impl<S: Source, C, Args> QueueHandle<S, C, Args> {
             Some(TaskState::Running) => CancelOutcome::CancelRequested,
             Some(_) => CancelOutcome::Cancelled,
             None => match self.source.remove(id).await {
-                Ok(true) => CancelOutcome::Cancelled,
-                Ok(false) => CancelOutcome::Unknown,
+                Ok(Withdrawal::Removed) => CancelOutcome::Cancelled,
+                Ok(Withdrawal::CancelRequested) => CancelOutcome::CancelRequested,
+                Ok(Withdrawal::Finished) => CancelOutcome::AlreadyFinished,
+                Ok(Withdrawal::NotFound) => CancelOutcome::Unknown,
                 Err(e) => {
                     warn!(
                         event = "source",
@@ -128,7 +145,10 @@ impl<S: Source, C, Args> QueueHandle<S, C, Args> {
                 }
             },
         };
-        if outcome != CancelOutcome::Unknown {
+        if matches!(
+            outcome,
+            CancelOutcome::CancelRequested | CancelOutcome::Cancelled
+        ) {
             info!(
                 event = "task",
                 action = "cancel_requested",
@@ -180,6 +200,7 @@ impl<S: Source, C: Codec<Args, S::Message>, Args> QueueHandle<S, C, Args> {
                 id,
                 reason: RejectReason::SourceFull,
             }),
+            Ok(PushResult::Finished(state)) => Ok(PushOutcome::AlreadyFinished { id, state }),
             Err(PushError::Unsupported) => Err(PushTaskError::Unsupported),
             Err(PushError::Closed) => Err(PushTaskError::Stopping),
             Err(PushError::Source(e)) => Err(PushTaskError::Source(Box::new(e))),
