@@ -15,7 +15,7 @@ categories = ["asynchronous", "concurrency"]
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync", "time"] }
+tokio = { workspace = true, features = ["sync", "time", "macros"] }
 tokio-util = { workspace = true }
 tower = { workspace = true }
 uuid = { workspace = true }

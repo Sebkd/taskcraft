@@ -47,6 +47,10 @@
 //!   [`TaskError::abort`] or [`ResultExt::or_abort`] says "do not retry"
 //!   however the error is wrapped. [`run_attempt`] turns panics into
 //!   [`Outcome::Panic`].
+//! - **Poll strategy** ([`PollStrategy`]) — how long a worker sleeps after an
+//!   empty poll: a fixed interval, growing pauses, a wake-up from the source,
+//!   or the first of several. [`Poller::wait`] ends the sleep at once on
+//!   shutdown or on a wake-up.
 //! - **Test harness** (`taskcraft::testing`, feature `test-util`) — a source
 //!   with scripted failures, a delivery ledger and reusable worker scenarios.
 //! - **Log partition, offset** — a log source's ordered sequence of messages
@@ -61,6 +65,7 @@ mod memory;
 mod metadata;
 mod offset;
 mod outcome;
+mod poll;
 mod source;
 mod state;
 mod status;
@@ -80,6 +85,7 @@ pub use memory::{Delivery, InMemorySource};
 pub use metadata::{Metadata, MetadataRegistry, TRACE_PARENT};
 pub use offset::OffsetTracker;
 pub use outcome::{BoxError, ErrorKind, IntoOutcome, Outcome, ResultExt, TaskError};
+pub use poll::{PollStrategy, Poller, Wakeup};
 pub use source::{
     AckOverrideUnsupported, AckPointSupport, Capabilities, CloseReason, DeferError, Polled,
     PushError, PushResult, Source, WakeHandle, WakeSignal,
