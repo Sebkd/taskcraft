@@ -25,7 +25,7 @@ use crate::poll::{Poller, Wakeup};
 use crate::queue::{DeadLetter, OverflowPolicy, Queue, RejectFn, TimeoutOutcome};
 use crate::registry::TaskRegistry;
 use crate::retry::RetryPolicy;
-use crate::source::{Polled, Source};
+use crate::source::{AckPointSupport, Completion, Notice, Polled, Progress, Source};
 use crate::state::{Lifecycle, TaskState};
 use crate::status::FinishReason;
 use crate::task::{AckPoint, Task, TaskId};
@@ -122,6 +122,9 @@ struct ExecCtx<S: Source, C> {
     timeout_outcome: TimeoutOutcome,
     occupancy: Arc<Occupancy>,
     observers: Observers,
+    /// The source keeps task history: progress and final states are
+    /// recorded (rule 2.3.9 p. 6).
+    records: bool,
 }
 
 /// Sleeps the restart delay unless stopped; returns `true` when stopped.
@@ -194,6 +197,7 @@ where
     } = queue;
     let name: Arc<str> = config.name.into();
     let observers = observers_of(&observer_cell);
+    let store = source.capabilities().ack_point_support() == AckPointSupport::Fixed;
     info!(
         event = "worker",
         action = "started",
@@ -210,6 +214,7 @@ where
         registry,
         shared,
         supports_defer: source.capabilities().supports_defer(),
+        records: store,
         ack_errors: ack_errors.clone(),
         stop: ctx.stop.clone(),
         pools,
@@ -233,6 +238,15 @@ where
     let mut poller = Poller::new(&config.poll);
     let mut wake = source.subscribe();
     let mut failures: u32 = 0;
+    // Cancel requests and lost leases from the source (rule 2.3.20 pp. 5, 7).
+    let listener = source.notices().map(|notices| {
+        tokio::spawn(listen(
+            notices,
+            Arc::clone(&tasks),
+            Arc::clone(&name),
+            observers.clone(),
+        ))
+    });
     let stop = &ctx.stop;
 
     // Recovered tasks are accepted before the first poll, never rejected and
@@ -375,6 +389,7 @@ where
                     Err(error) => {
                         drop(gate);
                         observers.emit(&Event::DecodeFailed { queue: &name });
+                        let poison = FinishReason::Handler(error.to_string());
                         if let (Some(h), Some(message)) = (&dead_letter, copy) {
                             let letter = DeadLetter {
                                 queue: name.to_string(),
@@ -398,7 +413,11 @@ where
                                 error.to_string()
                             );
                         }
-                        if let Err(e) = source.ack(receipt).await {
+                        let end = Completion {
+                            state: TaskState::Failed,
+                            reason: Some(&poison),
+                        };
+                        if let Err(e) = settle(&*source, receipt, store, end).await {
                             let _ = ack_errors.send(e.to_string());
                         }
                         continue;
@@ -449,7 +468,11 @@ where
                                 reason: &FinishReason::RejectedOverflow,
                             });
                             reject_task(&name, &*hook, task);
-                            if let Err(e) = source.ack(receipt).await {
+                            let end = Completion {
+                                state: TaskState::Cancelled,
+                                reason: Some(&FinishReason::RejectedOverflow),
+                            };
+                            if let Err(e) = settle(&*source, receipt, store, end).await {
                                 let _ = ack_errors.send(e.to_string());
                             }
                             continue;
@@ -468,7 +491,14 @@ where
                     queue: &name,
                     task_id: task.id(),
                 });
-                let ack_later = match task.ack_point().unwrap_or(config.ack_point) {
+                // A task store records every final state; its ack point is
+                // not configurable (rule 2.3.9 p. 6).
+                let ack_point = if store {
+                    AckPoint::OnCompletion
+                } else {
+                    task.ack_point().unwrap_or(config.ack_point)
+                };
+                let ack_later = match ack_point {
                     AckPoint::OnAccept => {
                         if let Err(e) = source.ack(receipt.clone()).await {
                             let _ = ack_errors.send(e.to_string());
@@ -494,6 +524,9 @@ where
 
     // Pushes are refused from now on (rule 2.3.14 p. 3).
     tasks.set_closing();
+    if let Some(listener) = &listener {
+        listener.abort();
+    }
     let graceful = matches!(reason, StopReason::Shutdown);
     let (completed, cancelled, aborted) = drain(
         &mut running,
@@ -754,6 +787,7 @@ where
             e.attempt_started_at = Some(SystemTime::now());
             e.next_attempt_at = None;
         });
+        record(&ctx, receipt.clone(), TaskState::Running, number, retries).await;
         // The attempt's own flag: set by the task's flag and by the attempt
         // timeout, which must not cancel the retries that follow.
         let attempt_cancel = cancel.child_token();
@@ -845,6 +879,15 @@ where
                     e.attempt_started_at = None;
                     e.next_attempt_at = Some(due);
                 });
+                let number = task.attempt();
+                record(
+                    &ctx,
+                    receipt.clone(),
+                    TaskState::RetryWaiting,
+                    number,
+                    retries,
+                )
+                .await;
                 drop(pool_permits);
                 if ctx.retry.hold_slot {
                     held = Some(permit);
@@ -876,6 +919,101 @@ where
     }
 }
 
+/// Acks a delivery that ends before it runs; a task store records how.
+async fn settle<S: Source>(
+    source: &S,
+    receipt: S::Receipt,
+    store: bool,
+    completion: Completion<'_>,
+) -> Result<(), S::Error> {
+    if store {
+        source.complete(receipt, completion).await
+    } else {
+        source.ack(receipt).await
+    }
+}
+
+/// Tells a source that keeps task history where the task stands.
+async fn record<S: Source, C>(
+    ctx: &ExecCtx<S, C>,
+    receipt: Option<S::Receipt>,
+    state: TaskState,
+    attempt: u32,
+    retries: u32,
+) {
+    if !ctx.records {
+        return;
+    }
+    let Some(receipt) = receipt else {
+        return;
+    };
+    let progress = Progress {
+        state,
+        attempt,
+        retries,
+    };
+    if let Err(e) = ctx.source.progress(receipt, progress).await {
+        let _ = ctx.ack_errors.send(e.to_string());
+    }
+}
+
+/// Applies the source's notices to the registry: a cancel request or a lost
+/// lease sets the task's cancel flag with its reason.
+async fn listen(
+    mut notices: crate::source::Notices,
+    tasks: Arc<TaskRegistry>,
+    queue: Arc<str>,
+    observers: Observers,
+) {
+    while let Some(notice) = notices.recv().await {
+        match notice {
+            Notice::CancelRequested(id) => {
+                if tasks.cancel(&id).is_some() {
+                    info!(
+                        event = "task",
+                        action = "cancel_requested",
+                        "task cancel requested: queue={}, task_id={}",
+                        queue,
+                        id
+                    );
+                }
+            }
+            Notice::LeaseLost(id) => {
+                if tasks.cancel_with(&id, FinishReason::LeaseLost).is_some() {
+                    warn!(
+                        event = "lease",
+                        action = "lost",
+                        "lease lost: queue={}, task_id={}",
+                        queue,
+                        id
+                    );
+                    observers.emit(&Event::LeaseLost {
+                        queue: &queue,
+                        task_id: &id,
+                    });
+                }
+            }
+            Notice::TakenOver {
+                task_id,
+                previous_owner,
+            } => {
+                warn!(
+                    event = "lease",
+                    action = "taken_over",
+                    "task taken over after lease expiry: queue={}, task_id={}, previous_owner={}",
+                    queue,
+                    task_id,
+                    previous_owner
+                );
+                observers.emit(&Event::LeaseTakenOver {
+                    queue: &queue,
+                    task_id: &task_id,
+                });
+            }
+        }
+    }
+}
+
 /// Completes `grace` after a cancel request; never for shutdown, whose
 /// timeout and grace the drain enforces (rule 2.3.14).
 async fn forced_abort(
@@ -885,7 +1023,7 @@ async fn forced_abort(
     grace: Duration,
 ) {
     cancel.cancelled().await;
-    if tasks.cancel_reason(id) != FinishReason::CancelledByUser {
+    if tasks.cancel_reason(id) == FinishReason::CancelledByShutdown {
         pending::<()>().await;
     }
     sleep(grace).await;
@@ -939,12 +1077,21 @@ async fn finish<S: Source, C>(
     });
     ctx.tasks.remove(id);
     let acknowledged_by_defer = state == TaskState::Deferred;
-    let cancelled_by_shutdown = reason == Some(FinishReason::CancelledByShutdown);
+    // Shutdown leaves the task to be delivered again; a lost lease leaves it
+    // to its new owner (rule 2.3.20 p. 5).
+    let left_to_others = matches!(
+        reason,
+        Some(FinishReason::CancelledByShutdown | FinishReason::LeaseLost)
+    );
+    let completion = Completion {
+        state,
+        reason: reason.as_ref(),
+    };
     if ack_later
         && !acknowledged_by_defer
-        && !cancelled_by_shutdown
+        && !left_to_others
         && let Some(receipt) = receipt
-        && let Err(e) = ctx.source.ack(receipt).await
+        && let Err(e) = ctx.source.complete(receipt, completion).await
     {
         let _ = ctx.ack_errors.send(e.to_string());
     }

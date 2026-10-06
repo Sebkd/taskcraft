@@ -128,8 +128,9 @@ pub use queue::{DeadLetter, Queue, QueueBuilder, TimeoutOutcome};
 pub use retry::RetryPolicy;
 pub use runnable::{HandlerOutput, MachineEnd, OutcomeSlot, Run, Runnable, SpawnedMachine};
 pub use source::{
-    AckOverrideUnsupported, AckPointSupport, Capabilities, CloseReason, DeferError, Polled,
-    PushError, PushResult, Source, WakeHandle, WakeSignal,
+    AckOverrideUnsupported, AckPointSupport, Capabilities, CloseReason, Completion, DeferError,
+    Notice, Notices, Polled, Progress, PushError, PushResult, Source, WakeHandle, WakeSignal,
+    Withdrawal,
 };
 pub use state::{Lifecycle, TaskState};
 pub use status::{FinishReason, PushOutcome, RejectReason, TaskStatus};

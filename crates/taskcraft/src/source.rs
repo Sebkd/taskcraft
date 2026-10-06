@@ -4,9 +4,11 @@
 use std::fmt;
 use std::future::Future;
 
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
+use crate::state::TaskState;
+use crate::status::{FinishReason, TaskStatus};
 use crate::task::{AckPoint, TaskId};
 
 /// The answer to one poll of a source.
@@ -167,6 +169,80 @@ pub enum PushResult {
     Duplicate,
     /// The source is at capacity; nothing was stored.
     Full,
+    /// A task store still remembers a finished task with this id; nothing
+    /// was stored (rule 2.3.11 p. 4).
+    Finished(TaskState),
+}
+
+/// What a source did with a request to take a task back (spec 2.1.2.15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub enum Withdrawal {
+    /// The task was stored and not handed out; it is removed.
+    Removed,
+    /// Another process holds the task; the request is recorded for it.
+    CancelRequested,
+    /// A task store remembers the task as finished.
+    Finished,
+    /// The source holds no such task, or cannot take tasks back.
+    NotFound,
+}
+
+/// How a task ended, for a source that records it (spec 2.3.9 p. 6).
+#[derive(Debug, Clone, Copy)]
+pub struct Completion<'a> {
+    /// Succeeded, failed, panicked or cancelled.
+    pub state: TaskState,
+    /// Why, for failed, panicked and cancelled tasks.
+    pub reason: Option<&'a FinishReason>,
+}
+
+/// Where a task stands, for a source that records it.
+#[derive(Debug, Clone, Copy)]
+pub struct Progress {
+    /// Accepted, running or waiting to retry.
+    pub state: TaskState,
+    /// The attempt number.
+    pub attempt: u32,
+    /// The retries so far.
+    pub retries: u32,
+}
+
+/// What a source tells the worker about tasks this process holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Notice {
+    /// Another process asked to cancel the task (spec 2.1.2.15 p. 5).
+    CancelRequested(TaskId),
+    /// Another process took the task over: stop it without writing anything
+    /// (rule 2.3.20 p. 5).
+    LeaseLost(TaskId),
+    /// This process took over a task whose lease had expired (spec
+    /// 2.1.2.18).
+    TakenOver {
+        /// The task.
+        task_id: TaskId,
+        /// Its previous owner.
+        previous_owner: String,
+    },
+}
+
+/// The receiving end of a source's notices; one worker takes it.
+#[derive(Debug)]
+pub struct Notices(mpsc::UnboundedReceiver<Notice>);
+
+impl Notices {
+    /// A channel: the sender stays with the source.
+    #[must_use]
+    pub fn channel() -> (mpsc::UnboundedSender<Notice>, Self) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        (sender, Self(receiver))
+    }
+
+    /// The next notice; `None` once the source is gone.
+    pub async fn recv(&mut self) -> Option<Notice> {
+        self.0.recv().await
+    }
 }
 
 /// A push the source could not perform.
@@ -289,12 +365,50 @@ pub trait Source: Send + Sync + 'static {
         async { Err(PushError::Unsupported) }
     }
 
-    /// Removes a task that is stored but not handed out yet — ready or
-    /// deferred — and frees its id. Returns `false` when the source holds no
-    /// such task or cannot remove tasks (the default).
-    fn remove(&self, id: &TaskId) -> impl Future<Output = Result<bool, Self::Error>> + Send {
+    /// Takes back a task that is stored but not handed out yet — ready or
+    /// deferred — and frees its id; a task store also records a request to
+    /// cancel a task another process holds. The default holds nothing.
+    fn remove(&self, id: &TaskId) -> impl Future<Output = Result<Withdrawal, Self::Error>> + Send {
         let _ = id;
-        async { Ok(false) }
+        async { Ok(Withdrawal::NotFound) }
+    }
+
+    /// Records how a task ended, in place of [`ack`](Self::ack), for sources
+    /// that keep task history. The default acks.
+    fn complete(
+        &self,
+        receipt: Self::Receipt,
+        completion: Completion<'_>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        let _ = completion;
+        self.ack(receipt)
+    }
+
+    /// Records where a task stands: accepted, running, waiting to retry.
+    /// The default records nothing.
+    fn progress(
+        &self,
+        receipt: Self::Receipt,
+        progress: Progress,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        let _ = (receipt, progress);
+        async { Ok(()) }
+    }
+
+    /// The status of a task the source keeps, including finished ones. The
+    /// default keeps none.
+    fn status(
+        &self,
+        id: &TaskId,
+    ) -> impl Future<Output = Result<Option<TaskStatus>, Self::Error>> + Send {
+        let _ = id;
+        async { Ok(None) }
+    }
+
+    /// Notices about tasks this process holds: cancel requests and lost
+    /// leases. Taken once, by the queue's worker. The default has none.
+    fn notices(&self) -> Option<Notices> {
+        None
     }
 
     /// Takes a delivered task back, to be handed out again at `at`. Only for

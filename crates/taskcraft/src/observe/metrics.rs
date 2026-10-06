@@ -106,7 +106,9 @@ impl Observer for MetricsObserver {
             Event::Pushed { .. }
             | Event::AttemptStarted { .. }
             | Event::SourceClosed { .. }
-            | Event::WorkerStopped { .. } => {}
+            | Event::WorkerStopped { .. }
+            | Event::LeaseTakenOver { .. }
+            | Event::LeaseLost { .. } => {}
         }
     }
 

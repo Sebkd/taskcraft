@@ -151,6 +151,20 @@ pub enum Event<'a> {
         /// Why.
         reason: &'a StopReason,
     },
+    /// This process took over a task whose lease had expired.
+    LeaseTakenOver {
+        /// The queue.
+        queue: &'a str,
+        /// The task.
+        task_id: &'a TaskId,
+    },
+    /// Another process took a task of this one over; it stops here.
+    LeaseLost {
+        /// The queue.
+        queue: &'a str,
+        /// The task.
+        task_id: &'a TaskId,
+    },
     /// How many tasks run and wait now.
     Occupancy {
         /// The queue.

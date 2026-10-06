@@ -17,6 +17,9 @@ allow = [
     "ISC",
     "BSD-3-Clause",
     "Zlib",
+    # Data licence of `webpki-roots` (the Mozilla root certificates), behind
+    # the optional `tls-rustls` feature of the task store.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 # The list anticipates future dependencies; unused entries are expected.
