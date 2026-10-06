@@ -3,9 +3,8 @@
 //! Background task queue for Rust on the tokio runtime.
 //!
 //! **Work in progress.** This version contains the task model and the source
-//! contract and handlers: the task, its states and metadata, sources with an
-//! in-memory implementation, codecs, handlers and their outcomes. Workers and
-//! queues follow in later versions; the first working release
+//! contract, handlers, queues and workers. Retries, overflow policies, resource
+//! pools, status and cancellation by id follow in later versions; the first working release
 //! will be `0.1.0`.
 //!
 //! The target behaviour is specified in
@@ -51,6 +50,11 @@
 //!   empty poll: a fixed interval, growing pauses, a wake-up from the source,
 //!   or the first of several. [`Poller::wait`] ends the sleep at once on
 //!   shutdown or on a wake-up.
+//! - **Queue** ([`Queue`]) — a source, a codec and a handler with their
+//!   settings. **Worker** — the intake loop of one queue: polls, hands tasks
+//!   over without waiting for them, restarts after source errors, drains on
+//!   shutdown. **Monitor** ([`Monitor`]) — owns the workers and returns a
+//!   [`ShutdownReport`].
 //! - **Test harness** (`taskcraft::testing`, feature `test-util`) — a source
 //!   with scripted failures, a delivery ledger and reusable worker scenarios.
 //! - **Log partition, offset** — a log source's ordered sequence of messages
@@ -63,15 +67,18 @@ mod error;
 mod handler;
 mod memory;
 mod metadata;
+mod monitor;
 mod offset;
 mod outcome;
 mod poll;
+mod queue;
 mod source;
 mod state;
 mod status;
 mod task;
 #[cfg(feature = "test-util")]
 pub mod testing;
+mod worker;
 
 pub use attempt::{CatchPanic, catch_panic, outcome_of, run_attempt};
 pub use codec::{Codec, CodecError, IdentityCodec, JsonCodec};
@@ -83,9 +90,11 @@ pub use handler::{
 };
 pub use memory::{Delivery, InMemorySource};
 pub use metadata::{Metadata, MetadataRegistry, TRACE_PARENT};
+pub use monitor::{Monitor, QueueReport, ShutdownReport, StopReason};
 pub use offset::OffsetTracker;
 pub use outcome::{BoxError, ErrorKind, IntoOutcome, Outcome, ResultExt, TaskError};
 pub use poll::{PollStrategy, Poller, Wakeup};
+pub use queue::{DeadLetter, Queue, QueueBuilder};
 pub use source::{
     AckOverrideUnsupported, AckPointSupport, Capabilities, CloseReason, DeferError, Polled,
     PushError, PushResult, Source, WakeHandle, WakeSignal,
@@ -93,3 +102,5 @@ pub use source::{
 pub use state::{Lifecycle, TaskState};
 pub use status::{FinishReason, PushOutcome, RejectReason, TaskStatus};
 pub use task::{AckPoint, Task, TaskId, TaskParts};
+/// The token that signals shutdown to a [`Monitor`].
+pub use tokio_util::sync::CancellationToken;

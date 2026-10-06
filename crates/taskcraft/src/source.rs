@@ -255,7 +255,7 @@ pub trait Source: Send + Sync + 'static {
     /// The raw message the queue's codec turns into a task.
     type Message: Send + 'static;
     /// What identifies one delivery on ack and defer.
-    type Receipt: Send + 'static;
+    type Receipt: Clone + Send + 'static;
     /// A source failure such as a lost connection. Transient: the worker
     /// restarts its loop after it.
     type Error: std::error::Error + Send + Sync + 'static;
