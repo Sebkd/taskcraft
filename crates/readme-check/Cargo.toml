@@ -1,0 +1,26 @@
+[package]
+name = "readme-check"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Compiles the code of the taskcraft READMEs as doc tests; never published"
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
+serde = { workspace = true, features = ["derive"] }
+sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio"] }
+statecraft-fsm = { version = "0.2", features = ["tokio"] }
+taskcraft = { path = "../taskcraft", features = ["metrics", "log", "test-util"] }
+taskcraft-kafka = { path = "../taskcraft-kafka" }
+taskcraft-postgres = { path = "../taskcraft-postgres" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "test-util", "signal"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
+
+[lints]
+workspace = true

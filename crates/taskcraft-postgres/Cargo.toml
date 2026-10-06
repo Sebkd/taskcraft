@@ -10,13 +10,11 @@ readme = "README.md"
 description = "PostgreSQL task store for taskcraft: push, status and history, deferred redelivery, leases"
 keywords = ["queue", "postgres", "background", "tasks", "tokio"]
 categories = ["asynchronous", "concurrency", "database"]
-# Published together with `taskcraft` 0.1.0, like `taskcraft-kafka`.
-publish = false
 
 [dependencies]
 serde_json = { workspace = true }
 sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio"] }
-taskcraft = { path = "../taskcraft", version = "0.0.0" }
+taskcraft = { path = "../taskcraft", version = "0.1.0" }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "rt"] }
 tracing = { workspace = true }

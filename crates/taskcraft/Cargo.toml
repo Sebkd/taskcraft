@@ -49,5 +49,9 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 name = "observability"
 required-features = ["metrics"]
 
+# docs.rs shows every feature: `MetricsObserver`, `testing`.
+[package.metadata.docs.rs]
+all-features = true
+
 [lints]
 workspace = true

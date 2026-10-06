@@ -81,8 +81,16 @@ fn library_sources_print_nothing() {
                 pending.push(path);
             } else {
                 let text = std::fs::read_to_string(&path).unwrap();
-                for banned in ["println!", "eprintln!", "print!(", "eprint!(", "dbg!("] {
-                    assert!(!text.contains(banned), "{banned} in {}", path.display());
+                // Code only: doc examples may print, they are not the library.
+                let code = text.lines().filter(|l| !l.trim_start().starts_with("//"));
+                for line in code {
+                    for banned in ["println!", "eprintln!", "print!(", "eprint!(", "dbg!("] {
+                        assert!(
+                            !line.contains(banned),
+                            "{banned} in {}: {line}",
+                            path.display()
+                        );
+                    }
                 }
             }
         }

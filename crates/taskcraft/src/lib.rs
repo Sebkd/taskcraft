@@ -2,14 +2,52 @@
 //!
 //! Background task queue for Rust on the tokio runtime.
 //!
-//! **Work in progress.** This version contains the task model and the source
-//! contract, handlers, queues and workers with retries, overflow policies and
-//! resource pools, push, status and cancellation by id, recovery on start and
-//! attempt timeouts. The Kafka source and the task store follow in later
-//! versions; the first working release will be `0.1.0`.
+//! Built for long, heavy and stateful work: tasks that run for hours, hold
+//! scarce resources, survive a restart, and can be asked about — and
+//! stopped — by id. A handler is a plain `async fn`; its result is data:
+//! success, retry, abort or defer.
 //!
-//! The target behaviour is specified in
-//! [`openspec/specs/taskcraft/taskcraft.md`](https://github.com/Sebkd/taskcraft/blob/master/openspec/specs/taskcraft/taskcraft.md).
+//! ```
+//! use std::sync::Arc;
+//! use taskcraft::{CancellationToken, IdentityCodec, InMemorySource, Monitor, Queue, Task, task_fn};
+//!
+//! async fn send_report(month: String) {
+//!     println!("report for {month} sent");
+//! }
+//!
+//! # #[tokio::main(flavor = "current_thread")]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let queue = Queue::builder("reports", Arc::new(InMemorySource::default()), IdentityCodec::new(), task_fn(send_report))
+//!     .concurrency(4)
+//!     .no_recovery()
+//!     .build()?;
+//! let reports = queue.handle();
+//! let stop = CancellationToken::new();
+//! let monitor = tokio::spawn(Monitor::new().register(queue)?.run(stop.clone()));
+//!
+//! let _ = reports.push(Task::new("2026-10".to_owned())).await?;
+//! stop.cancel();
+//! let report = monitor.await??;
+//! # let _ = report;
+//! # Ok(()) }
+//! ```
+//!
+//! - **Start here:** [`Queue::builder`], [`task_fn`], [`Monitor`],
+//!   [`QueueHandle`].
+//! - **Sources:** [`InMemorySource`] here; Kafka in
+//!   [`taskcraft-kafka`](https://docs.rs/taskcraft-kafka), a PostgreSQL task
+//!   store with leases in [`taskcraft-postgres`](https://docs.rs/taskcraft-postgres);
+//!   your own through [`Source`].
+//! - **Features:** `metrics` (`MetricsObserver`), `log`, `test-util`
+//!   (`taskcraft::testing`).
+//! - **More:** the [README](https://github.com/Sebkd/taskcraft#readme) tours
+//!   every capability; the
+//!   [example catalog](https://github.com/Sebkd/taskcraft/tree/master/examples)
+//!   has fifteen runnable examples.
+//!
+//! The behaviour is specified in
+//! [`openspec/specs/taskcraft/taskcraft.md`](https://github.com/Sebkd/taskcraft/blob/master/openspec/specs/taskcraft/taskcraft.md)
+//! (in Russian).
 //!
 //! ## Terms
 //!

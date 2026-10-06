@@ -36,6 +36,10 @@
 //! # let _ = report;
 //! # Ok(()) }
 //! ```
+//!
+//! More: the [README](https://github.com/Sebkd/taskcraft/tree/master/crates/taskcraft-postgres#readme)
+//! and the [`durable-store`](https://github.com/Sebkd/taskcraft/blob/master/crates/taskcraft-postgres/examples/durable-store.rs)
+//! example.
 
 mod source;
 mod store;
