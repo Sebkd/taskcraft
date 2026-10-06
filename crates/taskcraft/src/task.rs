@@ -108,7 +108,63 @@ pub struct Task<Args> {
     accepted_at: Option<SystemTime>,
 }
 
+/// Every field of a [`Task`], for codecs and sources that store tasks and
+/// must restore them exactly, attempt counters included.
+#[derive(Debug, Clone)]
+pub struct TaskParts<Args> {
+    /// The task id.
+    pub id: TaskId,
+    /// The arguments.
+    pub args: Args,
+    /// The metadata.
+    pub metadata: Metadata,
+    /// The attempt number: 0 before the first attempt.
+    pub attempt: u32,
+    /// How many retries happened.
+    pub retries: u32,
+    /// The per-task ack point, if any.
+    pub ack_point: Option<AckPoint>,
+    /// When the task was accepted, if it has been.
+    pub accepted_at: Option<SystemTime>,
+}
+
 impl<Args> Task<Args> {
+    /// Rebuilds a task from all of its fields. Meant for codecs and sources;
+    /// application code builds tasks with [`Task::new`].
+    pub fn from_parts(parts: TaskParts<Args>) -> Self {
+        let TaskParts {
+            id,
+            args,
+            metadata,
+            attempt,
+            retries,
+            ack_point,
+            accepted_at,
+        } = parts;
+        Self {
+            id,
+            args,
+            metadata,
+            attempt,
+            retries,
+            ack_point,
+            accepted_at,
+        }
+    }
+
+    /// Splits the task into all of its fields.
+    pub fn into_parts(self) -> TaskParts<Args> {
+        TaskParts {
+            id: self.id,
+            args: self.args,
+            metadata: self.metadata,
+            attempt: self.attempt,
+            retries: self.retries,
+            ack_point: self.ack_point,
+            accepted_at: self.accepted_at,
+        }
+    }
+
     /// A task with these arguments and a generated id.
     pub fn new(args: Args) -> Self {
         Self {
