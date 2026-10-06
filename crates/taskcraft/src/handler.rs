@@ -130,6 +130,11 @@ impl From<Rejection> for Outcome {
 }
 
 /// A value a handler can declare as a parameter and get from the request.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be a handler parameter",
+    label = "not extractable from a task",
+    note = "handler parameters after the arguments must implement `FromTask`: Meta<T>, Option<Meta<T>>, Attempt, TaskId, Data<T>"
+)]
 pub trait FromTask<Args>: Sized {
     /// Extracts the value.
     ///
@@ -261,6 +266,14 @@ impl<Args, T: Send + Sync + 'static> FromTask<Args> for Data<T> {
 /// async fn wrong(_args: u32, _not_extractable: std::fs::File) {}
 /// let _ = taskcraft::task_fn(wrong);
 /// ```
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a taskcraft handler",
+    label = "not a handler function",
+    note = "a handler is `async fn(Args, X1, …, Xn) -> R` with at most 8 extra parameters",
+    note = "every extra parameter must implement `FromTask`: Meta<T>, Option<Meta<T>>, Attempt, TaskId, Data<T>",
+    note = "`R` must be (), Outcome, Result<(), TaskError> or Result<Outcome, TaskError>",
+    note = "the function must be Clone + Send + Sync + 'static and its future Send"
+)]
 pub trait Handler<Args, X>: Clone + Send + Sync + 'static {
     /// Extracts the parameters and runs the function. A failed extraction
     /// aborts without calling it.

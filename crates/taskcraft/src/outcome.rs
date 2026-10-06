@@ -241,6 +241,11 @@ impl<T, E: Into<BoxError>> ResultExt<T> for Result<T, E> {
 ///
 /// Implemented for `()`, [`Outcome`], `Result<(), TaskError>` and
 /// `Result<Outcome, TaskError>`; any other return type does not compile.
+#[diagnostic::on_unimplemented(
+    message = "a handler cannot return `{Self}`",
+    label = "not a handler outcome",
+    note = "return (), Outcome, Result<(), TaskError> or Result<Outcome, TaskError>; `?` turns any error into TaskError"
+)]
 pub trait IntoOutcome {
     /// The outcome this value stands for.
     fn into_outcome(self) -> Outcome;
