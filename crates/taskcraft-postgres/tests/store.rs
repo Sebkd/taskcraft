@@ -22,6 +22,11 @@ const SEC: Duration = Duration::from_secs(1);
 fn url() -> Option<String> {
     let url = std::env::var("TASKCRAFT_POSTGRES_URL").ok();
     if url.is_none() {
+        // CI sets this so that a lost database address fails, not skips.
+        assert!(
+            std::env::var_os("TASKCRAFT_REQUIRE_SERVICES").is_none(),
+            "TASKCRAFT_POSTGRES_URL is required"
+        );
         eprintln!("TASKCRAFT_POSTGRES_URL is not set: skipped");
     }
     url

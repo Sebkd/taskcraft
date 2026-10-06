@@ -105,6 +105,7 @@ jobs:
           - 9092:9092
     env:
       TASKCRAFT_KAFKA_BROKERS: localhost:9092
+      TASKCRAFT_REQUIRE_SERVICES: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -143,6 +144,7 @@ jobs:
           --health-retries 30
     env:
       TASKCRAFT_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres
+      TASKCRAFT_REQUIRE_SERVICES: "1"
     steps:
       - uses: actions/checkout@v4
 

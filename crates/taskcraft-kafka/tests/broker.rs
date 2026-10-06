@@ -32,6 +32,11 @@ const SEC: Duration = Duration::from_secs(1);
 fn brokers() -> Option<String> {
     let brokers = std::env::var("TASKCRAFT_KAFKA_BROKERS").ok();
     if brokers.is_none() {
+        // CI sets this so that a lost broker address fails, not skips.
+        assert!(
+            std::env::var_os("TASKCRAFT_REQUIRE_SERVICES").is_none(),
+            "TASKCRAFT_KAFKA_BROKERS is required"
+        );
         eprintln!("TASKCRAFT_KAFKA_BROKERS is not set: skipped");
     }
     brokers
