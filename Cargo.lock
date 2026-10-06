@@ -335,6 +335,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
+name = "statecraft-fsm"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a0f31ab87b51d98340e2e3b7511d9f0cfbf9c1223540fd81f7036bec6c89df6"
+dependencies = [
+ "statecraft-fsm-macros",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "statecraft-fsm-macros"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66f89086874bb3f0ed2dbd1c5fc20c8b52488fe0cc95b509c179c2de8718a0e4"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -368,6 +391,7 @@ version = "0.0.0"
 dependencies = [
  "serde",
  "serde_json",
+ "statecraft-fsm",
  "thiserror",
  "tokio",
  "tokio-util",

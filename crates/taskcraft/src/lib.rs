@@ -47,6 +47,11 @@
 //!   [`TaskError::abort`] or [`ResultExt::or_abort`] says "do not retry"
 //!   however the error is wrapped. [`run_attempt`] turns panics into
 //!   [`Outcome::Panic`].
+//! - **Runnable** ([`Runnable`]) — a process a handler returns as
+//!   [`Run`] instead of an outcome: started, softly stopped on the task's
+//!   cancel flag, its result turned into the task's outcome.
+//!   [`SpawnedMachine`] adapts a state machine running in its own task (for
+//!   example statecraft-fsm), which leaves its outcome in an [`OutcomeSlot`].
 //! - **Poll strategy** ([`PollStrategy`]) — how long a worker sleeps after an
 //!   empty poll: a fixed interval, growing pauses, a wake-up from the source,
 //!   or the first of several. [`Poller::wait`] ends the sleep at once on
@@ -91,6 +96,7 @@ mod poll;
 mod queue;
 mod registry;
 mod retry;
+mod runnable;
 mod source;
 mod state;
 mod status;
@@ -116,6 +122,7 @@ pub use outcome::{BoxError, ErrorKind, IntoOutcome, Outcome, ResultExt, TaskErro
 pub use poll::{PollStrategy, Poller, Wakeup};
 pub use queue::{DeadLetter, Queue, QueueBuilder, TimeoutOutcome};
 pub use retry::RetryPolicy;
+pub use runnable::{HandlerOutput, MachineEnd, OutcomeSlot, Run, Runnable, SpawnedMachine};
 pub use source::{
     AckOverrideUnsupported, AckPointSupport, Capabilities, CloseReason, DeferError, Polled,
     PushError, PushResult, Source, WakeHandle, WakeSignal,

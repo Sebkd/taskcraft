@@ -159,6 +159,14 @@ criteria = "safe-to-deploy"
 version = "0.4.12"
 criteria = "safe-to-deploy"
 
+[[exemptions.statecraft-fsm]]
+version = "0.2.0"
+criteria = "safe-to-run"
+
+[[exemptions.statecraft-fsm-macros]]
+version = "0.2.0"
+criteria = "safe-to-run"
+
 [[exemptions.syn]]
 version = "2.0.119"
 criteria = "safe-to-deploy"

@@ -43,6 +43,15 @@ jobs:
           done
           exit $missing
 
+      # Invariant 1.3.14: the core depends on no Kafka client, database
+      # driver or state machine library, whatever its features.
+      - name: Core dependency tree
+        run: |
+          if cargo tree -p taskcraft -e normal --all-features --locked | grep -E 'rdkafka|statecraft|sqlx|postgres'; then
+            echo "::error::the core must not depend on these crates"
+            exit 1
+          fi
+
       - name: Format
         run: cargo fmt --all --check
 
