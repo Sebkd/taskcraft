@@ -452,8 +452,8 @@ The tests and examples use:
   checking its own result.
 - [Specification](https://github.com/Sebkd/taskcraft/blob/master/openspec/specs/taskcraft/taskcraft.md)
   (in Russian): the behaviour, invariants and acceptance criteria; changes
-  are kept in [`openspec/changes/archive`](https://github.com/Sebkd/taskcraft/tree/master/openspec/changes/archive).
-- [Changelog](https://github.com/Sebkd/taskcraft/blob/master/CHANGELOG.md).
+  are kept in [`openspec/changes/archive`](https://github.com/Sebkd/taskcraft/tree/master/openspec/changes/archive),
+  one record per change — the project's history.
 
 ## Requirements
 

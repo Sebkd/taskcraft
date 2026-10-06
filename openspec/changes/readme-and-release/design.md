@@ -20,7 +20,7 @@ README репозитория — страница `taskcraft` на crates.io (`
 
 ## Goals / Non-Goals
 
-**Goals:** README трёх пакетов с проверяемым кодом, благодарности apalis, вводные docs.rs, `CHANGELOG.md`, переход на 0.1.0, готовность к публикации.
+**Goals:** README трёх пакетов с проверяемым кодом, благодарности apalis, вводные docs.rs, переход на 0.1.0, готовность к публикации.
 
 **Non-Goals:** публикация до команды владельца; изменения поведения.
 
@@ -96,7 +96,7 @@ README репозитория — страница `taskcraft` на crates.io (`
 **Решение**:
 - `workspace.package.version = "0.1.0"`.
 - Пакеты Kafka и хранилища зависят от `taskcraft = { path, version = "0.1.0" }`; `publish = false` снимается.
-- `CHANGELOG.md` в формате Keep a Changelog: раздел 0.1.0 по пакетам.
+- Отдельный changelog не ведётся: история — спецификация и архив заявок (решение владельца проекта).
 - `cargo publish --dry-run` пакетов Kafka и хранилища проверяет сборку против `taskcraft` 0.1.0 с crates.io и до его публикации не пройдёт. Поэтому локально проверяются `cargo package --list` (README входит в архив) и `--dry-run` для `taskcraft`. В CI шаг «Publish (dry run)» временно пропускает пакеты, чья версия `taskcraft` ещё не опубликована; после публикации `taskcraft` 0.1.0 шаг проверяет все три.
 - Публикация — по команде владельца: `taskcraft`, затем `taskcraft-kafka` и `taskcraft-postgres`.
 
