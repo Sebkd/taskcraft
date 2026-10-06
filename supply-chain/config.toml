@@ -19,11 +19,19 @@ url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/
 [policy.taskcraft]
 audit-as-crates-io = false
 
+[[exemptions.bytes]]
+version = "1.12.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.cfg-if]]
 version = "1.0.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.futures-core]]
+version = "0.3.34"
+criteria = "safe-to-deploy"
+
+[[exemptions.futures-sink]]
 version = "0.3.34"
 criteria = "safe-to-deploy"
 
@@ -99,6 +107,10 @@ criteria = "safe-to-deploy"
 version = "3.0.6"
 criteria = "safe-to-deploy"
 
+[[exemptions.sync_wrapper]]
+version = "0.1.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.thiserror]]
 version = "2.0.21"
 criteria = "safe-to-deploy"
@@ -113,6 +125,30 @@ criteria = "safe-to-deploy"
 
 [[exemptions.tokio-macros]]
 version = "2.7.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.tokio-util]]
+version = "0.7.19"
+criteria = "safe-to-deploy"
+
+[[exemptions.tower]]
+version = "0.5.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.tower-layer]]
+version = "0.3.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.tower-service]]
+version = "0.3.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.tracing]]
+version = "0.1.44"
+criteria = "safe-to-deploy"
+
+[[exemptions.tracing-core]]
+version = "0.1.36"
 criteria = "safe-to-deploy"
 
 [[exemptions.unicode-ident]]

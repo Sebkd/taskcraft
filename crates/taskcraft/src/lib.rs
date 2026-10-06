@@ -3,8 +3,9 @@
 //! Background task queue for Rust on the tokio runtime.
 //!
 //! **Work in progress.** This version contains the task model and the source
-//! contract: the task, its states and metadata, sources with an in-memory
-//! implementation, and codecs. Workers and queues follow in later versions; the first working release
+//! contract and handlers: the task, its states and metadata, sources with an
+//! in-memory implementation, codecs, handlers and their outcomes. Workers and
+//! queues follow in later versions; the first working release
 //! will be `0.1.0`.
 //!
 //! The target behaviour is specified in
@@ -36,26 +37,45 @@
 //!   memory, also the reference implementation of the contract.
 //! - **Codec** ([`Codec`]) — turns a source's messages into tasks and back;
 //!   [`JsonCodec`] is the default for sources that store bytes.
+//! - **Handler** — a plain `async fn(Args, X1, …, Xn)` turned into a tower
+//!   service by [`task_fn`]. The extra parameters are **extractable values**
+//!   ([`FromTask`]): [`Meta<T>`](Meta), [`Attempt`], [`TaskId`],
+//!   [`Data<T>`](Data). Missing required metadata aborts the attempt before
+//!   the handler runs.
+//! - **Outcome** ([`Outcome`]) — success, retry, abort, defer or panic. The
+//!   classification is data: `?` on any error gives a retry, and
+//!   [`TaskError::abort`] or [`ResultExt::or_abort`] says "do not retry"
+//!   however the error is wrapped. [`run_attempt`] turns panics into
+//!   [`Outcome::Panic`].
 //! - **Log partition, offset** — a log source's ordered sequence of messages
 //!   and a message's position in it; [`OffsetTracker`] finds how far a
 //!   partition may be committed.
 
+mod attempt;
 mod codec;
 mod error;
+mod handler;
 mod memory;
 mod metadata;
 mod offset;
+mod outcome;
 mod source;
 mod state;
 mod status;
 mod task;
 
+pub use attempt::{CatchPanic, catch_panic, outcome_of, run_attempt};
 pub use codec::{Codec, CodecError, IdentityCodec, JsonCodec};
 
 pub use error::{ConfigError, InvalidTransition, MetadataError};
+pub use handler::{
+    Attempt, BoxFuture, Data, FromTask, Handler, Meta, Rejection, SharedData, TaskFn, TaskRequest,
+    task_fn,
+};
 pub use memory::{Delivery, InMemorySource};
 pub use metadata::{Metadata, MetadataRegistry, TRACE_PARENT};
 pub use offset::OffsetTracker;
+pub use outcome::{BoxError, ErrorKind, IntoOutcome, Outcome, ResultExt, TaskError};
 pub use source::{
     AckOverrideUnsupported, AckPointSupport, Capabilities, CloseReason, DeferError, Polled,
     PushError, PushResult, Source, WakeHandle, WakeSignal,
