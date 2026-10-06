@@ -47,6 +47,8 @@
 //!   [`TaskError::abort`] or [`ResultExt::or_abort`] says "do not retry"
 //!   however the error is wrapped. [`run_attempt`] turns panics into
 //!   [`Outcome::Panic`].
+//! - **Test harness** (`taskcraft::testing`, feature `test-util`) — a source
+//!   with scripted failures, a delivery ledger and reusable worker scenarios.
 //! - **Log partition, offset** — a log source's ordered sequence of messages
 //!   and a message's position in it; [`OffsetTracker`] finds how far a
 //!   partition may be committed.
@@ -63,6 +65,8 @@ mod source;
 mod state;
 mod status;
 mod task;
+#[cfg(feature = "test-util")]
+pub mod testing;
 
 pub use attempt::{CatchPanic, catch_panic, outcome_of, run_attempt};
 pub use codec::{Codec, CodecError, IdentityCodec, JsonCodec};
