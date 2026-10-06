@@ -13,6 +13,7 @@ use crate::error::ConfigError;
 use crate::handle::QueueHandle;
 use crate::handler::{BoxFuture, SharedData};
 use crate::metadata::MetadataRegistry;
+use crate::observe::ObserverCell;
 use crate::outcome::BoxError;
 use crate::poll::PollStrategy;
 use crate::registry::TaskRegistry;
@@ -111,6 +112,7 @@ pub struct Queue<S: Source, C, Svc, Args> {
     pub(crate) overflow: OverflowPolicy<Args>,
     pub(crate) tasks: Arc<TaskRegistry>,
     pub(crate) recovery: Option<RecoveryFn<Args>>,
+    pub(crate) observers: ObserverCell,
     pub(crate) _args: PhantomData<fn() -> Args>,
 }
 
@@ -146,6 +148,7 @@ impl<S: Source, C: Codec<Args, S::Message>, Svc, Args> Queue<S, C, Svc, Args> {
                 overflow: OverflowPolicy::Wait { limit: None },
                 tasks: Arc::new(TaskRegistry::new()),
                 recovery: None,
+                observers: ObserverCell::default(),
                 _args: PhantomData,
             },
         }
@@ -168,6 +171,7 @@ impl<S: Source, C, Svc, Args> Queue<S, C, Svc, Args> {
             Arc::clone(&self.source),
             Arc::clone(&self.codec),
             Arc::clone(&self.tasks),
+            Arc::clone(&self.observers),
         )
     }
 }

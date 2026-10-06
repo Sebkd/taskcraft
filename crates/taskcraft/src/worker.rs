@@ -17,8 +17,9 @@ use tracing::{Instrument, debug, debug_span, error, info, warn};
 use crate::attempt::run_attempt;
 use crate::codec::Codec;
 use crate::handler::{SharedData, TaskRequest};
-use crate::metadata::MetadataRegistry;
+use crate::metadata::{MetadataRegistry, TraceParent};
 use crate::monitor::{QueueReport, StopReason, WorkerContext};
+use crate::observe::{AttemptEnd, Event, Observers, Occupancy, Waiting, observers_of};
 use crate::outcome::{BoxError, Outcome};
 use crate::poll::{Poller, Wakeup};
 use crate::queue::{DeadLetter, OverflowPolicy, Queue, TimeoutOutcome};
@@ -32,8 +33,46 @@ use crate::task::{AckPoint, Task, TaskId};
 /// Permits of one monitor pool taken by every attempt of a queue.
 #[derive(Debug, Clone)]
 pub(crate) struct PoolClaim {
+    pub(crate) name: Arc<str>,
+    pub(crate) size: u32,
     pub(crate) semaphore: Arc<Semaphore>,
     pub(crate) permits: u32,
+}
+
+/// Permits of one pool held by an attempt; reports the pool's usage when
+/// taken and when given back.
+struct PoolHeld {
+    permit: Option<OwnedSemaphorePermit>,
+    claim: PoolClaim,
+    observers: Observers,
+}
+
+impl PoolHeld {
+    fn new(claim: &PoolClaim, permit: OwnedSemaphorePermit, observers: &Observers) -> Self {
+        let held = Self {
+            permit: Some(permit),
+            claim: claim.clone(),
+            observers: observers.clone(),
+        };
+        held.report();
+        held
+    }
+
+    fn report(&self) {
+        let free = u32::try_from(self.claim.semaphore.available_permits()).unwrap_or(u32::MAX);
+        self.observers.emit(&Event::PoolUsage {
+            pool: &self.claim.name,
+            in_use: self.claim.size.saturating_sub(free),
+            total: self.claim.size,
+        });
+    }
+}
+
+impl Drop for PoolHeld {
+    fn drop(&mut self) {
+        drop(self.permit.take());
+        self.report();
+    }
 }
 
 /// How a task left the worker, for the shutdown report.
@@ -80,6 +119,8 @@ struct ExecCtx<S: Source, C> {
     cancel_grace: Duration,
     attempt_timeout: Option<Duration>,
     timeout_outcome: TimeoutOutcome,
+    occupancy: Arc<Occupancy>,
+    observers: Observers,
 }
 
 /// Sleeps the restart delay unless stopped; returns `true` when stopped.
@@ -93,7 +134,14 @@ async fn restart_pause(ctx: &WorkerContext, delay: Duration) -> bool {
 
 /// Logs a source failure and waits out the restart delay (transitions
 /// 2.4.2.5 / 2.4.2.12 and 2.4.2.9). Returns `true` when stopped meanwhile.
-async fn restart(ctx: &WorkerContext, queue: &str, failures: u32, error: &str) -> bool {
+async fn restart(
+    ctx: &WorkerContext,
+    observers: &Observers,
+    queue: &str,
+    failures: u32,
+    error: &str,
+) -> bool {
+    observers.emit(&Event::SourceFailed { queue });
     let delay = ctx.restart.delay(failures);
     error!(
         event = "source",
@@ -112,6 +160,7 @@ async fn restart(ctx: &WorkerContext, queue: &str, failures: u32, error: &str) -
         "worker resumed: queue={}",
         queue
     );
+    observers.emit(&Event::WorkerRestarted { queue });
     false
 }
 
@@ -139,9 +188,11 @@ where
         dead_letter,
         overflow,
         tasks,
+        observers: observer_cell,
         ..
     } = queue;
     let name: Arc<str> = config.name.into();
+    let observers = observers_of(&observer_cell);
     info!(
         event = "worker",
         action = "started",
@@ -167,6 +218,8 @@ where
         cancel_grace: config.cancel_grace,
         attempt_timeout: config.attempt_timeout,
         timeout_outcome: config.timeout_outcome,
+        occupancy: Occupancy::new(Arc::clone(&name), observers.clone()),
+        observers: observers.clone(),
     });
     let (reject, wait_limit) = match overflow {
         OverflowPolicy::Wait { limit } => (None, limit.unwrap_or(config.concurrency)),
@@ -197,6 +250,10 @@ where
                 name,
                 task.id()
             );
+            observers.emit(&Event::Duplicate {
+                queue: &name,
+                task_id: task.id(),
+            });
             continue;
         }
         task.mark_accepted(accepted_at);
@@ -207,6 +264,10 @@ where
             name,
             task.id()
         );
+        observers.emit(&Event::Accepted {
+            queue: &name,
+            task_id: task.id(),
+        });
         let slot = match Arc::clone(&slots).try_acquire_owned() {
             Ok(permit) => Slot::Held(permit),
             Err(_) => Slot::Wait {
@@ -233,7 +294,7 @@ where
         }
         if let Ok(error) = ack_failures.try_recv() {
             failures += 1;
-            if restart(&ctx, &name, failures, &error).await {
+            if restart(&ctx, &observers, &name, failures, &error).await {
                 break StopReason::Shutdown;
             }
             continue;
@@ -268,7 +329,7 @@ where
             Err(e) => {
                 drop(gate);
                 failures += 1;
-                if restart(&ctx, &name, failures, &e.to_string()).await {
+                if restart(&ctx, &observers, &name, failures, &e.to_string()).await {
                     break StopReason::Shutdown;
                 }
             }
@@ -279,7 +340,7 @@ where
                     woke = poller.wait(wake.as_mut(), stop) => woke,
                     Some(error) = ack_failures.recv() => {
                         failures += 1;
-                        if restart(&ctx, &name, failures, &error).await {
+                        if restart(&ctx, &observers, &name, failures, &error).await {
                             break StopReason::Shutdown;
                         }
                         continue;
@@ -297,6 +358,7 @@ where
                     name,
                     reason.as_str()
                 );
+                observers.emit(&Event::SourceClosed { queue: &name });
                 break StopReason::SourceClosed(reason);
             }
             Ok(Polled::Task { message, receipt }) => {
@@ -307,6 +369,7 @@ where
                     Ok(task) => task,
                     Err(error) => {
                         drop(gate);
+                        observers.emit(&Event::DecodeFailed { queue: &name });
                         if let (Some(h), Some(message)) = (&dead_letter, copy) {
                             let letter = DeadLetter {
                                 queue: name.to_string(),
@@ -352,6 +415,10 @@ where
                         name,
                         task.id()
                     );
+                    observers.emit(&Event::Duplicate {
+                        queue: &name,
+                        task_id: task.id(),
+                    });
                     if let Err(e) = source.ack(receipt).await {
                         let _ = ack_errors.send(e.to_string());
                     }
@@ -372,6 +439,11 @@ where
                         } else {
                             let hook = reject.as_ref().expect("Free gate means reject policy");
                             tasks.remove(task.id());
+                            observers.emit(&Event::Rejected {
+                                queue: &name,
+                                task_id: task.id(),
+                                reason: &FinishReason::RejectedOverflow,
+                            });
                             reject_task(&name, &**hook, task);
                             if let Err(e) = source.ack(receipt).await {
                                 let _ = ack_errors.send(e.to_string());
@@ -388,6 +460,10 @@ where
                     name,
                     task.id()
                 );
+                observers.emit(&Event::Accepted {
+                    queue: &name,
+                    task_id: task.id(),
+                });
                 let ack_later = match task.ack_point().unwrap_or(config.ack_point) {
                     AckPoint::OnAccept => {
                         if let Err(e) = source.ack(receipt.clone()).await {
@@ -435,6 +511,7 @@ where
             name,
             error
         );
+        observers.emit(&Event::SourceFailed { queue: &name });
     }
     info!(
         event = "worker",
@@ -443,6 +520,10 @@ where
         name,
         reason.to_string()
     );
+    observers.emit(&Event::WorkerStopped {
+        queue: &name,
+        reason: &reason,
+    });
     QueueReport {
         queue: name.to_string(),
         reason,
@@ -607,6 +688,9 @@ where
                 slots: Arc::clone(&ctx.slots),
             },
         };
+        // Counted as waiting while it waits for a slot or a pool.
+        let waiting = (matches!(slot, Slot::Wait { .. }) || !ctx.pools.is_empty())
+            .then(|| ctx.occupancy.enter(Waiting::Slot));
         let permit = match slot {
             Slot::Held(permit) => permit,
             Slot::Wait { place, slots } => {
@@ -644,8 +728,9 @@ where
                     permits.expect("pools are never closed")
                 }
             };
-            pool_permits.push(permits);
+            pool_permits.push(PoolHeld::new(claim, permits, &ctx.observers));
         }
+        drop(waiting);
 
         advance(&mut life, TaskState::Running);
         task.begin_attempt();
@@ -667,6 +752,8 @@ where
         )
         .with_cancel(attempt_cancel.clone());
         let timed_out = AtomicBool::new(false);
+        let running = ctx.occupancy.enter(Waiting::Running);
+        let started = Instant::now();
         let outcome = tokio::select! {
             outcome = attempt(&mut service, request, &ctx) => Some(outcome),
             () = forced_abort(&cancel, &ctx.tasks, &id, ctx.cancel_grace) => None,
@@ -705,6 +792,17 @@ where
             Some(outcome) => decide(outcome, &mut task, receipt.clone(), &ctx).await,
             None => Next::Finish(TaskState::Cancelled, Some(FinishReason::CancelledByUser)),
         };
+        drop(running);
+        ctx.observers.emit(&Event::AttemptFinished {
+            queue: &ctx.queue,
+            task_id: &id,
+            attempt: number,
+            outcome: match next {
+                Next::Finish(state, _) => AttemptEnd::Finished(state),
+                Next::Pause(_) => AttemptEnd::Retry,
+            },
+            duration: started.elapsed(),
+        });
 
         match next {
             Next::Finish(state, reason) => {
@@ -741,6 +839,7 @@ where
                 } else {
                     drop(permit);
                 }
+                let retrying = ctx.occupancy.enter(Waiting::Retry);
                 tokio::select! {
                     biased;
                     () = ctx.stop.cancelled() => {
@@ -754,6 +853,7 @@ where
                     }
                     () = sleep(pause) => {}
                 }
+                drop(retrying);
                 advance(&mut life, TaskState::Accepted);
                 ctx.tasks.update(&id, |e| {
                     e.state = TaskState::Accepted;
@@ -818,6 +918,13 @@ async fn finish<S: Source, C>(
 ) -> TaskEnd {
     advance(life, state);
     log_outcome(&ctx.queue, id, attempt, state, reason.as_ref());
+    ctx.observers.emit(&Event::Finished {
+        queue: &ctx.queue,
+        task_id: id,
+        attempt,
+        state,
+        reason: reason.as_ref(),
+    });
     ctx.tasks.remove(id);
     let acknowledged_by_defer = state == TaskState::Deferred;
     let cancelled_by_shutdown = reason == Some(FinishReason::CancelledByShutdown);
@@ -845,8 +952,28 @@ where
 {
     let id = request.task().id().clone();
     let number = request.task().attempt();
-    let span =
-        debug_span!("taskcraft.attempt", queue = %ctx.queue, task_id = %id, attempt = number);
+    let span = debug_span!(
+        "taskcraft.attempt",
+        queue = %ctx.queue,
+        task_id = %id,
+        attempt = number,
+        trace_parent = tracing::field::Empty,
+    );
+    // Spec 4.4.1: the attempt span carries the trace context of the push,
+    // for the tracing layer that links it to its parent.
+    if !span.is_disabled()
+        && let Ok(Some(TraceParent(parent))) = request
+            .task()
+            .metadata()
+            .resolve::<TraceParent>(request.registry())
+    {
+        span.record("trace_parent", parent.as_str());
+    }
+    ctx.observers.emit(&Event::AttemptStarted {
+        queue: &ctx.queue,
+        task_id: &id,
+        attempt: number,
+    });
     async {
         debug!(
             event = "task",
@@ -896,6 +1023,12 @@ where
                 pause,
                 reason.to_string()
             );
+            ctx.observers.emit(&Event::Retry {
+                queue: &ctx.queue,
+                task_id: task.id(),
+                attempt: task.attempt(),
+                pause,
+            });
             Next::Pause(pause)
         }
         Outcome::Defer { delay, .. } => {
@@ -946,6 +1079,13 @@ fn cancel_waiting<S: Source, C>(
         TaskState::Cancelled,
         Some(&FinishReason::CancelledByShutdown),
     );
+    ctx.observers.emit(&Event::Finished {
+        queue: &ctx.queue,
+        task_id: id,
+        attempt,
+        state: TaskState::Cancelled,
+        reason: Some(&FinishReason::CancelledByShutdown),
+    });
     ctx.tasks.remove(id);
     TaskEnd::CancelledWaiting
 }

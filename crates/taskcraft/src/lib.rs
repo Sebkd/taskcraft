@@ -90,6 +90,7 @@ mod handler;
 mod memory;
 mod metadata;
 mod monitor;
+mod observe;
 mod offset;
 mod outcome;
 mod poll;
@@ -115,8 +116,11 @@ pub use handler::{
     TaskRequest, task_fn,
 };
 pub use memory::{Delivery, InMemorySource};
-pub use metadata::{Metadata, MetadataRegistry, TRACE_PARENT};
+pub use metadata::{Metadata, MetadataRegistry, TRACE_PARENT, TraceParent};
 pub use monitor::{Monitor, QueueReport, ShutdownReport, StopReason};
+#[cfg(feature = "metrics")]
+pub use observe::MetricsObserver;
+pub use observe::{AttemptEnd, Event, Observer};
 pub use offset::OffsetTracker;
 pub use outcome::{BoxError, ErrorKind, IntoOutcome, Outcome, ResultExt, TaskError};
 pub use poll::{PollStrategy, Poller, Wakeup};
