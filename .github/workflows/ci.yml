@@ -213,14 +213,32 @@ jobs:
         with:
           tool: cargo-fuzz
 
+      - name: Build the fuzz targets
+        working-directory: fuzz
+        run: cargo fuzz build
+
       # A minute per decoder: no panic, no hang (10 s per input). Longer
       # runs are done by hand before releases.
-      - name: Fuzz the decoders
+      - name: Fuzz JsonCodec
         working-directory: fuzz
-        run: |
-          for target in json_decode kafka_decode metadata; do
-            cargo fuzz run "$target" -- -max_total_time=60 -timeout=10
-          done
+        run: cargo fuzz run json_decode -- -max_total_time=60 -timeout=10
+
+      - name: Fuzz KafkaJsonCodec
+        working-directory: fuzz
+        run: cargo fuzz run kafka_decode -- -max_total_time=60 -timeout=10
+
+      - name: Fuzz metadata
+        working-directory: fuzz
+        run: cargo fuzz run metadata -- -max_total_time=60 -timeout=10
+
+      # The input that broke a decoder, to replay with `cargo fuzz run <target> <file>`.
+      - name: Upload failing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore
 
   coverage:
     name: Coverage

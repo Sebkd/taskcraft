@@ -108,7 +108,8 @@ async fn killed_process_task_is_taken_over() {
         .bind(&name)
         .fetch_optional(&pool)
         .await
-        .unwrap();
+        // On a fresh database the child creates the tables first.
+        .unwrap_or(None);
         row == Some(("running".to_owned(), Some(process.clone())))
     };
     assert!(until(60 * SEC, owned).await, "the child took the task");
