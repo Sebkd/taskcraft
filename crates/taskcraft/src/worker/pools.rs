@@ -1,6 +1,6 @@
 //! Monitor pools taken by attempts (spec 2.8).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -12,6 +12,10 @@ pub(crate) struct PoolClaim {
     pub(crate) name: Arc<str>,
     pub(crate) size: u32,
     pub(crate) semaphore: Arc<Semaphore>,
+    /// Permits held by attempts, shared by every queue of the pool. Not
+    /// the semaphore's free count: a released permit may pass to a waiter
+    /// that is then cancelled and gives it back without a report.
+    pub(crate) in_use: Arc<Mutex<u32>>,
     pub(crate) permits: u32,
 }
 
@@ -34,15 +38,22 @@ impl PoolHeld {
             claim: claim.clone(),
             observers: observers.clone(),
         };
-        held.report();
+        held.count(|n| n.saturating_add(claim.permits));
         held
     }
 
-    fn report(&self) {
-        let free = u32::try_from(self.claim.semaphore.available_permits()).unwrap_or(u32::MAX);
+    /// Updates the pool's count and reports it under one lock: the reports
+    /// of a pool come in order, so the last one is its usage.
+    fn count(&self, change: impl FnOnce(u32) -> u32) {
+        let mut in_use = self
+            .claim
+            .in_use
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *in_use = change(*in_use);
         self.observers.emit(&Event::PoolUsage {
             pool: &self.claim.name,
-            in_use: self.claim.size.saturating_sub(free),
+            in_use: *in_use,
             total: self.claim.size,
         });
     }
@@ -51,6 +62,7 @@ impl PoolHeld {
 impl Drop for PoolHeld {
     fn drop(&mut self) {
         drop(self.permit.take());
-        self.report();
+        let permits = self.claim.permits;
+        self.count(|n| n.saturating_sub(permits));
     }
 }

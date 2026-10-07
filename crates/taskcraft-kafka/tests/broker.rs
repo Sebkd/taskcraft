@@ -118,6 +118,27 @@ async fn produce(brokers: &str, topic: &str, messages: impl IntoIterator<Item = 
     }
 }
 
+/// One message into each partition of a two-partition topic.
+async fn warm_up(brokers: &str, topic: &str) {
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", brokers)
+        .create()
+        .unwrap();
+    for partition in 0..2 {
+        let key = format!("warm-{partition}");
+        let headers = OwnedHeaders::new().insert(Header {
+            key: "billing.region",
+            value: Some("\"eu\""),
+        });
+        let record = FutureRecord::to(topic)
+            .partition(partition)
+            .key(&key)
+            .payload("0")
+            .headers(headers);
+        producer.send(record, 10 * SEC).await.unwrap();
+    }
+}
+
 /// The committed offset of partition 0 for `group`.
 fn committed(brokers: &str, topic: &str, group: &str) -> Option<i64> {
     let consumer: BaseConsumer = ClientConfig::new()
@@ -242,11 +263,29 @@ async fn a_group_shares_partitions_between_processes() {
     let (first, second) = (Seen::default(), Seen::default());
     let (run_a, stop_a) = spawn(&brokers, &topic, "group-c", &first, None);
     let (run_b, stop_b) = spawn(&brokers, &topic, "group-c", &second, None);
-    // Both members join the group before any message is there.
-    sleep(15 * SEC).await;
+    // The group is settled once each member got a message of its own
+    // partition: no rebalance hands the jobs out twice after that.
+    warm_up(&brokers, &topic).await;
+    let warmed = |seen: &Seen| {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|(id, _)| id.starts_with("warm-"))
+    };
+    assert!(
+        until(90 * SEC, || warmed(&first) && warmed(&second)).await,
+        "both members hold a partition"
+    );
 
     produce(&brokers, &topic, (0..40).map(|n| (format!("job-{n}"), n))).await;
-    let total = || first.lock().unwrap().len() + second.lock().unwrap().len();
+    let jobs = |seen: &Seen| {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| id.starts_with("job-"))
+            .count()
+    };
+    let total = || jobs(&first) + jobs(&second);
     assert!(until(60 * SEC, || total() >= 40).await);
     sleep(2 * SEC).await;
 
@@ -257,11 +296,13 @@ async fn a_group_shares_partitions_between_processes() {
         .iter()
         .chain(second.lock().unwrap().iter())
     {
-        *runs.entry(id.clone()).or_default() += 1;
+        if id.starts_with("job-") {
+            *runs.entry(id.clone()).or_default() += 1;
+        }
     }
     assert_eq!(runs.len(), 40);
     assert!(runs.values().all(|&n| n == 1), "a task ran twice: {runs:?}");
-    assert!(!first.lock().unwrap().is_empty() && !second.lock().unwrap().is_empty());
+    assert!(jobs(&first) > 0 && jobs(&second) > 0);
     stop_a.cancel();
     stop_b.cancel();
     run_a.await.unwrap();

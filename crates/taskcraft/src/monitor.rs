@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::Semaphore;
@@ -117,6 +117,14 @@ type WorkerFn = Box<dyn FnOnce(WorkerContext) -> BoxFuture<'static, QueueReport>
 /// 2.4.2.1, 2.4.2.2).
 type StartFn = Box<dyn FnOnce() -> BoxFuture<'static, Result<WorkerFn, BoxError>> + Send>;
 
+/// A pool declared on the monitor: its size, permits, and the permits held.
+#[derive(Debug)]
+struct Pool {
+    size: u32,
+    semaphore: Arc<Semaphore>,
+    in_use: Arc<Mutex<u32>>,
+}
+
 /// A registered queue, not started yet.
 struct Registered {
     name: String,
@@ -153,7 +161,7 @@ pub struct Monitor {
     shutdown_timeout: Duration,
     restart: RestartDelays,
     names: HashSet<String>,
-    pools: HashMap<String, (u32, Arc<Semaphore>)>,
+    pools: HashMap<String, Pool>,
     queues: Vec<Registered>,
     observers: Vec<Arc<dyn Observer>>,
 }
@@ -226,7 +234,12 @@ impl Monitor {
             });
         }
         let semaphore = Arc::new(Semaphore::new(size as usize));
-        self.pools.insert(name, (size, semaphore));
+        let pool = Pool {
+            size,
+            semaphore,
+            in_use: Arc::new(Mutex::new(0)),
+        };
+        self.pools.insert(name, pool);
         Ok(self)
     }
 
@@ -271,7 +284,12 @@ impl Monitor {
         }
         let mut claims = Vec::new();
         for (pool, &permits) in &queue.config.pools {
-            let Some((size, semaphore)) = self.pools.get(pool) else {
+            let Some(Pool {
+                size,
+                semaphore,
+                in_use,
+            }) = self.pools.get(pool)
+            else {
                 return Err(ConfigError::UnknownPool { name: pool.clone() });
             };
             if permits == 0 {
@@ -287,6 +305,7 @@ impl Monitor {
                 name: pool.as_str().into(),
                 size: *size,
                 semaphore: Arc::clone(semaphore),
+                in_use: Arc::clone(in_use),
                 permits,
             });
         }

@@ -2,7 +2,13 @@
 //! cancellation (rule 2.3.11, invariant 1.3.9).
 
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::PoisonError;
+#[cfg(not(taskcraft_loom))]
+use std::sync::{Mutex, MutexGuard};
+
+// Model checking: every interleaving of the registry's critical sections.
+#[cfg(taskcraft_loom)]
+use loom::sync::{Mutex, MutexGuard};
 use std::time::SystemTime;
 
 use tokio_util::sync::CancellationToken;
@@ -201,5 +207,63 @@ mod tests {
         assert!(!registry.is_closing());
         registry.set_closing();
         assert!(registry.is_closing());
+    }
+}
+
+/// Invariant 1.3.8 under every interleaving `loom` finds (change
+/// concurrency-and-fuzz-tests, criterion 1). Run with
+/// `RUSTFLAGS="--cfg taskcraft_loom" cargo test -p taskcraft --release --lib loom`.
+#[cfg(all(test, taskcraft_loom))]
+mod loom_tests {
+    use loom::sync::Arc;
+    use loom::thread;
+
+    use super::*;
+
+    fn accept(registry: &TaskRegistry, id: &str) -> bool {
+        registry
+            .try_accept(
+                &TaskId::new(id),
+                SystemTime::UNIX_EPOCH,
+                CancellationToken::new(),
+            )
+            .is_ok()
+    }
+
+    #[test]
+    fn two_accepts_of_one_id_make_one_task() {
+        loom::model(|| {
+            let registry = Arc::new(TaskRegistry::new());
+            let threads: Vec<_> = (0..2)
+                .map(|_| {
+                    let registry = Arc::clone(&registry);
+                    thread::spawn(move || accept(&registry, "x"))
+                })
+                .collect();
+            let accepted = threads
+                .into_iter()
+                .map(|t| t.join().unwrap())
+                .filter(|ok| *ok)
+                .count();
+            assert_eq!(accepted, 1);
+            assert_eq!(registry.len(), 1);
+            assert_eq!(registry.state(&TaskId::new("x")), Some(TaskState::Accepted));
+        });
+    }
+
+    #[test]
+    fn accept_and_remove_leave_the_registry_consistent() {
+        loom::model(|| {
+            let registry = Arc::new(TaskRegistry::new());
+            let other = Arc::clone(&registry);
+            let remover = thread::spawn(move || other.remove(&TaskId::new("x")));
+            let accepted = accept(&registry, "x");
+            remover.join().unwrap();
+            assert!(accepted);
+            // Removed after the accept, or before it and the task stays.
+            let left = registry.len();
+            assert!(left <= 1);
+            assert_eq!(accept(&registry, "x"), left == 0);
+        });
     }
 }

@@ -156,6 +156,94 @@ jobs:
       - name: Check
         run: cargo semver-checks --workspace --all-features
 
+  loom:
+    name: Loom
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --cfg taskcraft_loom
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # Every interleaving of the task registry's critical sections
+      # (invariant 1.3.8). The cfg swaps its mutex for loom's.
+      - name: Model check
+        run: cargo test -p taskcraft --release --locked --lib loom
+
+  properties:
+    name: Properties
+    runs-on: ubuntu-latest
+    env:
+      PROPTEST_CASES: "10000"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # Random sequences of pushes, cancels, outcomes and stops against
+      # invariants 1.3.6, 1.3.8 and 1.3.9; the other runs use 256 cases.
+      - name: Test
+        run: cargo test -p taskcraft --release --locked --test properties
+
+  fuzz:
+    name: Fuzz (short)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (nightly)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+
+      # A prebuilt cargo-fuzz is a musl binary and defaults to its own
+      # target, whose std the toolchain lacks: the steps name the target.
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      # Logs of this repository's runs are not public: on failure the key
+      # lines go out as annotations, which are.
+      - name: Build the fuzz targets
+        working-directory: fuzz
+        run: ../.github/annotate.sh build.log cargo fuzz build --target x86_64-unknown-linux-gnu
+
+      # A minute per decoder: no panic, no hang (10 s per input). Longer
+      # runs are done by hand before releases.
+      - name: Fuzz JsonCodec
+        working-directory: fuzz
+        run: ../.github/annotate.sh run.log cargo fuzz run json_decode --target x86_64-unknown-linux-gnu -- -max_total_time=60 -timeout=10
+
+      - name: Fuzz KafkaJsonCodec
+        working-directory: fuzz
+        run: ../.github/annotate.sh run.log cargo fuzz run kafka_decode --target x86_64-unknown-linux-gnu -- -max_total_time=60 -timeout=10
+
+      - name: Fuzz metadata
+        working-directory: fuzz
+        run: ../.github/annotate.sh run.log cargo fuzz run metadata --target x86_64-unknown-linux-gnu -- -max_total_time=60 -timeout=10
+
+      # The input that broke a decoder, to replay with `cargo fuzz run <target> <file>`.
+      - name: Upload failing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest

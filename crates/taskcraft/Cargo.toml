@@ -44,6 +44,12 @@ metrics-exporter-prometheus = { version = "0.18", default-features = false }
 log = "0.4"
 metrics-util = { version = "0.20", default-features = false, features = ["debugging"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "json", "env-filter"] }
+# Sequences of pushes, cancels, outcomes and stops against the invariants.
+proptest = { version = "1", default-features = false, features = ["std"] }
+
+# Model checking of the task registry; only with `--cfg taskcraft_loom`.
+[target.'cfg(taskcraft_loom)'.dev-dependencies]
+loom = "0.7"
 
 [[example]]
 name = "observability"
