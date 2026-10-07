@@ -1,0 +1,42 @@
+# Fuzz targets for the decoders (change concurrency-and-fuzz-tests). Outside
+# the workspace: libFuzzer needs nightly. Run from this directory:
+#   cargo +nightly fuzz run json_decode -- -max_total_time=600
+[package]
+name = "taskcraft-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+taskcraft = { path = "../crates/taskcraft" }
+taskcraft-kafka = { path = "../crates/taskcraft-kafka" }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "json_decode"
+path = "fuzz_targets/json_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kafka_decode"
+path = "fuzz_targets/kafka_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "metadata"
+path = "fuzz_targets/metadata.rs"
+test = false
+doc = false
+bench = false
