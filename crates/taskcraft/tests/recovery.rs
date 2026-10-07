@@ -7,9 +7,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use taskcraft::codec::IdentityCodec;
+use taskcraft::error::PushTaskError;
 use taskcraft::{
-    AckPoint, Attempt, BoxError, Cancel, CancellationToken, IdentityCodec, InMemorySource, Monitor,
-    Outcome, PushTaskError, Queue, RetryPolicy, StopReason, Task, TaskId, TimeoutOutcome, task_fn,
+    AckPoint, Attempt, BoxError, Cancel, CancellationToken, InMemorySource, Monitor, Outcome,
+    Queue, RetryPolicy, StopReason, Task, TaskId, TimeoutOutcome, task_fn,
 };
 use tokio::time::{Instant, sleep};
 
@@ -66,10 +68,10 @@ async fn recovered_tasks_run_before_polled_ones() {
     .recover_with(|| async { Ok::<_, BoxError>(three_tasks()) })
     .build()
     .unwrap();
-    let handle = queue.handle();
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
     let _ = handle.push(Task::new(10).with_id("polled")).await.unwrap();
     let stop = CancellationToken::new();
-    let monitor = tokio::spawn(run(Monitor::new().register(queue).unwrap(), stop.clone()));
+    let monitor = tokio::spawn(run(monitor, stop.clone()));
 
     assert!(until(SEC, || started(&log).len() == 4).await);
     assert_eq!(started(&log), [1, 2, 3, 10]);
@@ -100,15 +102,10 @@ async fn failing_hook_keeps_the_monitor_from_starting() {
     .recover_with(|| async { Err::<Vec<Task<u32>>, _>("database is down") })
     .build()
     .unwrap();
-    let handle = queue.handle();
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
     let _ = handle.push(Task::new(1)).await.unwrap();
 
-    let error = Monitor::new()
-        .register(queue)
-        .unwrap()
-        .run(CancellationToken::new())
-        .await
-        .unwrap_err();
+    let error = monitor.run(CancellationToken::new()).await.unwrap_err();
     assert_eq!(error.queue(), "q");
     assert_eq!(
         error.to_string(),
@@ -142,7 +139,7 @@ async fn stop_during_the_hook_ends_the_run() {
     .build()
     .unwrap();
     let stop = CancellationToken::new();
-    let monitor = tokio::spawn(run(Monitor::new().register(queue).unwrap(), stop.clone()));
+    let monitor = tokio::spawn(run(Monitor::new().register(queue).unwrap().0, stop.clone()));
     sleep(SEC).await;
 
     let at = Instant::now();
@@ -180,7 +177,7 @@ async fn recovered_tasks_are_never_rejected() {
         .build()
         .unwrap();
     let stop = CancellationToken::new();
-    let monitor = tokio::spawn(run(Monitor::new().register(queue).unwrap(), stop.clone()));
+    let monitor = tokio::spawn(run(Monitor::new().register(queue).unwrap().0, stop.clone()));
 
     assert!(until(60 * SEC, || started(&log).len() == 3).await);
     assert_eq!(started(&log), [1, 2, 3]);
@@ -218,9 +215,9 @@ async fn attempt_timeout_fails_the_task() {
         .ack_point(AckPoint::OnCompletion)
         .build()
         .unwrap();
-    let handle = queue.handle();
     let stop = CancellationToken::new();
-    let monitor = tokio::spawn(run(Monitor::new().register(queue).unwrap(), stop.clone()));
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
+    let monitor = tokio::spawn(run(monitor, stop.clone()));
     let start = Instant::now();
     let _ = handle.push(Task::new(1)).await.unwrap();
 
@@ -262,9 +259,9 @@ async fn timeout_decides_over_the_handler_answer() {
         .no_recovery()
         .build()
         .unwrap();
-    let handle = queue.handle();
     let stop = CancellationToken::new();
-    let monitor = tokio::spawn(run(Monitor::new().register(queue).unwrap(), stop.clone()));
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
+    let monitor = tokio::spawn(run(monitor, stop.clone()));
     let start = Instant::now();
     let _ = handle.push(Task::new(1)).await.unwrap();
 
@@ -308,9 +305,9 @@ async fn timeout_with_retry_runs_again() {
         .no_recovery()
         .build()
         .unwrap();
-    let handle = queue.handle();
     let stop = CancellationToken::new();
-    let monitor = tokio::spawn(run(Monitor::new().register(queue).unwrap(), stop.clone()));
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
+    let monitor = tokio::spawn(run(monitor, stop.clone()));
     let id = TaskId::new("t");
     let _ = handle.push(Task::new(1).with_id("t")).await.unwrap();
 
@@ -331,9 +328,9 @@ async fn ack_on_accept_comes_before_completion() {
         .no_recovery()
         .build()
         .unwrap();
-    let handle = queue.handle();
     let stop = CancellationToken::new();
-    let monitor = tokio::spawn(run(Monitor::new().register(queue).unwrap(), stop.clone()));
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
+    let monitor = tokio::spawn(run(monitor, stop.clone()));
     let id = TaskId::new("a");
     let _ = handle.push(Task::new(1).with_id("a")).await.unwrap();
 

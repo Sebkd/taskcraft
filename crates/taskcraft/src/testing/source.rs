@@ -7,8 +7,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use crate::codec::{Codec, CodecError};
 use crate::source::{
-    AckPointSupport, Capabilities, CloseReason, Polled, PushError, PushResult, Source, WakeHandle,
-    WakeSignal,
+    AckPointSupport, Capabilities, CloseReason, Polled, PushError, PushResult, PushSource, Source,
+    WakeHandle, WakeSignal, Withdrawal,
 };
 use crate::task::{Task, TaskId};
 
@@ -154,7 +154,7 @@ impl<Args: Clone + Send + 'static> Source for FaultySource<Args> {
     type Error = InjectedError;
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities::new(AckPointSupport::PerTask).with_push()
+        Capabilities::new(AckPointSupport::PerTask)
     }
 
     async fn poll(&self) -> Result<Polled<Scripted<Args>, u64>, InjectedError> {
@@ -206,7 +206,9 @@ impl<Args: Clone + Send + 'static> Source for FaultySource<Args> {
     fn subscribe(&self) -> Option<WakeSignal> {
         Some(self.wake.subscribe())
     }
+}
 
+impl<Args: Clone + Send + 'static> PushSource for FaultySource<Args> {
     async fn push(
         &self,
         _id: &TaskId,
@@ -221,6 +223,11 @@ impl<Args: Clone + Send + 'static> Source for FaultySource<Args> {
         }
         self.wake.wake();
         Ok(PushResult::Stored)
+    }
+
+    /// Scripted messages are not taken back.
+    async fn remove(&self, _id: &TaskId) -> Result<Withdrawal, InjectedError> {
+        Ok(Withdrawal::NotFound)
     }
 }
 

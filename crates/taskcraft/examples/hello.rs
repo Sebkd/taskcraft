@@ -8,9 +8,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use taskcraft::codec::IdentityCodec;
 use taskcraft::{
-    CancellationToken, Data, IdentityCodec, InMemorySource, Monitor, Queue, SharedData, Task,
-    task_fn,
+    CancellationToken, Data, InMemorySource, Monitor, Queue, SharedData, Task, task_fn,
 };
 
 /// The handler: a plain async function of the task's arguments, plus any
@@ -38,9 +38,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // are lost, and saying so is a decision (rule 2.3.9 p. 4).
     .no_recovery()
     .build()?;
-    let handle = queue.handle();
     let stop = CancellationToken::new();
-    let monitor = tokio::spawn(Monitor::new().register(queue)?.run(stop.clone()));
+    let (monitor, handle) = Monitor::new().register(queue)?;
+    let monitor = tokio::spawn(monitor.run(stop.clone()));
 
     for name in ["Ada", "Grace", "Linus"] {
         let _ = handle.push(Task::new(name.to_owned())).await?;

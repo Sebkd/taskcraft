@@ -7,10 +7,12 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use taskcraft::codec::IdentityCodec;
+use taskcraft::source::PushSource;
 use taskcraft::testing::{FaultyCodec, FaultySource};
 use taskcraft::{
-    AckPoint, Attempt, CancellationToken, IdentityCodec, InMemorySource, Monitor, Outcome, Queue,
-    QueueReport, RetryPolicy, ShutdownReport, Source, Task, TaskId, task_fn,
+    AckPoint, Attempt, CancellationToken, InMemorySource, Monitor, Outcome, Queue, QueueReport,
+    RetryPolicy, ShutdownReport, Task, TaskId, task_fn,
 };
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
@@ -87,7 +89,7 @@ async fn retries_until_success_and_acks_after() {
         .no_recovery()
         .build()
         .unwrap();
-    let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap());
+    let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap().0);
     source.enqueue(Task::new(7));
 
     assert!(until(2 * SEC, || attempts(&runs).len() == 2).await);
@@ -118,7 +120,7 @@ async fn always_retry_runs_exactly_max_attempts() {
         .no_recovery()
         .build()
         .unwrap();
-    let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap());
+    let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap().0);
     source.enqueue(Task::new(1));
     assert!(until(60 * SEC, || logs.count("task", "failed") == 1).await);
     sleep(60 * SEC).await;
@@ -159,7 +161,7 @@ async fn defer_in_process_does_not_use_up_attempts() {
         .no_recovery()
         .build()
         .unwrap();
-    let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap());
+    let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap().0);
     source.enqueue(Task::new(1));
     assert!(until(300 * SEC, || logs.count("task", "failed") == 1).await);
 
@@ -194,7 +196,7 @@ async fn defer_goes_to_a_source_that_supports_it() {
         .no_recovery()
         .build()
         .unwrap();
-    let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap());
+    let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap().0);
     let id = TaskId::new("d");
     let _ = source
         .push(&id, Task::new(1).with_id(id.clone()))
@@ -229,7 +231,7 @@ async fn shutdown_ends_a_retry_pause_at_once() {
         .no_recovery()
         .build()
         .unwrap();
-    let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap());
+    let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap().0);
     source.enqueue(Task::new(1));
     assert!(until(SEC, || attempts(&runs).len() == 1).await);
 
@@ -266,7 +268,8 @@ async fn shutdown_report_counts_a_task_in_a_pause() {
         Monitor::new()
             .shutdown_timeout(10 * SEC)
             .register(queue)
-            .unwrap(),
+            .unwrap()
+            .0,
     );
     source.enqueue(Task::new(0));
     source.enqueue(Task::new(1));
@@ -306,7 +309,7 @@ async fn second_task_start(hold_slot: bool) -> Duration {
         .no_recovery()
         .build()
         .unwrap();
-    let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap());
+    let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap().0);
     source.enqueue(Task::new(0));
     assert!(until(SEC, || attempts(&runs).len() == 1).await);
     source.enqueue(Task::new(1));

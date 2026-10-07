@@ -4,11 +4,11 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use taskcraft::{
-    AckPointSupport, Capabilities, Completion, DeferError, FinishReason, Notice, Notices, Polled,
-    Progress, PushError, PushResult, Source, TaskId, TaskState, TaskStatus, WakeHandle, WakeSignal,
-    Withdrawal,
+use taskcraft::source::{
+    Completion, DeferError, Notice, Notices, Polled, Progress, PushError, PushResult, StoreMessage,
+    TaskStore, WakeHandle, WakeSignal, Withdrawal,
 };
+use taskcraft::{FinishReason, TaskId, TaskState, TaskStatus};
 use tokio::time::Instant;
 
 use crate::store::{Held, PgStoreError, Shared, lock};
@@ -105,18 +105,11 @@ type StatusRow = (
     Option<f64>,
 );
 
-impl Source for PgSource {
-    type Message = Vec<u8>;
+impl TaskStore for PgSource {
     type Receipt = PgReceipt;
     type Error = PgStoreError;
 
-    fn capabilities(&self) -> Capabilities {
-        Capabilities::new(AckPointSupport::Fixed)
-            .with_push()
-            .with_defer()
-    }
-
-    async fn poll(&self) -> Result<Polled<Vec<u8>, PgReceipt>, PgStoreError> {
+    async fn poll(&self) -> Result<Polled<StoreMessage, PgReceipt>, PgStoreError> {
         let lease = self.shared.lease;
         let row: Option<(String, String, Option<String>)> = sqlx::query_as("WITH next AS (
                  SELECT queue, id, owner AS previous
@@ -156,15 +149,9 @@ impl Source for PgSource {
             });
         }
         Ok(Polled::Task {
-            message: task.into_bytes(),
+            message: StoreMessage::from_bytes(task.into_bytes()),
             receipt: PgReceipt { id },
         })
-    }
-
-    /// Nothing to do: the claim is the accept, and final states are
-    /// recorded by [`complete`](Source::complete).
-    async fn ack(&self, _: PgReceipt) -> Result<(), PgStoreError> {
-        Ok(())
     }
 
     async fn complete(
@@ -221,9 +208,9 @@ impl Source for PgSource {
     async fn push(
         &self,
         id: &TaskId,
-        message: Vec<u8>,
+        message: StoreMessage,
     ) -> Result<PushResult, PushError<PgStoreError>> {
-        let task = String::from_utf8(message)
+        let task = String::from_utf8(message.into_bytes())
             .map_err(|e| PushError::Source(PgStoreError::Data(e.to_string())))?;
         let inserted = sqlx::query(
             "INSERT INTO taskcraft_tasks (queue, id, task, state)
@@ -262,10 +249,10 @@ impl Source for PgSource {
     async fn defer(
         &self,
         receipt: PgReceipt,
-        message: Vec<u8>,
+        message: StoreMessage,
         at: Instant,
     ) -> Result<(), DeferError<PgStoreError>> {
-        let task = String::from_utf8(message)
+        let task = String::from_utf8(message.into_bytes())
             .map_err(|e| DeferError::Source(PgStoreError::Data(e.to_string())))?;
         let delay = at.saturating_duration_since(Instant::now());
         sqlx::query(

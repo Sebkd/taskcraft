@@ -11,9 +11,11 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use taskcraft::codec::IdentityCodec;
+use taskcraft::observe::{Event, Observer};
 use taskcraft::{
-    AckPoint, Attempt, CancellationToken, Event, IdentityCodec, InMemorySource, Monitor, Observer,
-    Outcome, Queue, RetryPolicy, Task, TaskError, TaskState, task_fn,
+    AckPoint, Attempt, CancellationToken, InMemorySource, Monitor, Outcome, Queue, RetryPolicy,
+    Task, TaskError, TaskState, task_fn,
 };
 
 /// What each task does, by name.
@@ -78,8 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..RetryPolicy::default()
     })
     .build()?;
-    let handle = queue.handle();
-    let monitor = Monitor::new()
+    let (monitor, handle) = Monitor::new()
         .observer(Arc::clone(&finals))
         .register(queue)?;
     let stop = CancellationToken::new();

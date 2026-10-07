@@ -20,12 +20,17 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use statecraft_fsm::fsm;
+use taskcraft::codec::{IdentityCodec, JsonCodec};
+use taskcraft::runnable::{OutcomeSlot, Run, SpawnedMachine};
+use taskcraft::source::{
+    AckPointSupport, Capabilities, DeferError, Polled, PushError, PushResult, PushSource, Source,
+    Withdrawal,
+};
 use taskcraft::testing::{FaultyCodec, FaultySource};
 use taskcraft::{
-    AckPoint, AckPointSupport, Attempt, BoxError, CancelOutcome, CancellationToken, Capabilities,
-    DeferError, IdentityCodec, InMemorySource, JsonCodec, MetadataRegistry, Monitor, Outcome,
-    OutcomeSlot, PollStrategy, Polled, PushOutcome, Queue, RejectReason, RetryPolicy, Run,
-    ShutdownReport, Source, SpawnedMachine, Task, TaskError, TaskId, TaskState, task_fn,
+    AckPoint, Attempt, BoxError, CancelOutcome, CancellationToken, InMemorySource,
+    MetadataRegistry, Monitor, Outcome, PollStrategy, PushOutcome, Queue, RejectReason,
+    RetryPolicy, ShutdownReport, Task, TaskError, TaskId, TaskState, task_fn,
 };
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
@@ -95,8 +100,8 @@ async fn long_tasks_reject_overflow_and_stop_mid_pause() {
         .no_recovery()
         .build()
         .unwrap();
-    let handle = queue.handle();
-    let (running, stop) = spawn(Monitor::new().register(queue).unwrap());
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
+    let (running, stop) = spawn(monitor);
 
     for n in 0..4 {
         let _ = handle.push(Task::new(n)).await.unwrap();
@@ -170,16 +175,13 @@ async fn pools_limit_work_and_cancel_frees_permits() {
     .no_recovery()
     .build()
     .unwrap();
-    let (unpack_handle, pack_handle) = (unpack.handle(), pack.handle());
     let monitor = Monitor::new()
         .pool("unpack", 2)
         .unwrap()
         .pool("pack", 1)
-        .unwrap()
-        .register(unpack)
-        .unwrap()
-        .register(pack)
         .unwrap();
+    let (monitor, unpack_handle) = monitor.register(unpack).unwrap();
+    let (monitor, pack_handle) = monitor.register(pack).unwrap();
     let (running, stop) = spawn(monitor);
     for n in 0..4 {
         let id = format!("u{n}");
@@ -287,7 +289,7 @@ impl Export {
 fn export_handler(
     records: &Records,
     runs: &Arc<AtomicU32>,
-) -> impl taskcraft::Handler<String, (TaskId,)> + use<> {
+) -> impl taskcraft::handler::Handler<String, (TaskId,)> + use<> {
     let (records, runs) = (Arc::clone(records), Arc::clone(runs));
     move |job: String, _: TaskId| {
         let (records, runs) = (Arc::clone(&records), Arc::clone(&runs));
@@ -328,8 +330,8 @@ async fn machine_task_survives_a_crash_through_the_recovery_hook() {
     .recover_with(|| async { Ok::<_, BoxError>(Vec::new()) })
     .build()
     .unwrap();
-    let handle = queue.handle();
-    let (crashed, _) = spawn(Monitor::new().register(queue).unwrap());
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
+    let (crashed, _) = spawn(monitor);
     let _ = handle
         .push(Task::new("job-7".to_owned()).with_id("job-7"))
         .await
@@ -373,8 +375,8 @@ async fn machine_task_survives_a_crash_through_the_recovery_hook() {
     })
     .build()
     .unwrap();
-    let handle = queue.handle();
-    let (running, stop) = spawn(Monitor::new().register(queue).unwrap());
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
+    let (running, stop) = spawn(monitor);
     assert!(
         until(HOUR, || records.lock().unwrap().get("job-7")
             == Some(&STEPS))
@@ -413,8 +415,8 @@ async fn panic_is_final_and_others_go_on() {
         .ack_point(AckPoint::OnCompletion)
         .build()
         .unwrap();
-    let handle = queue.handle();
-    let (running, stop) = spawn(Monitor::new().register(queue).unwrap());
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
+    let (running, stop) = spawn(monitor);
     for n in [0, 1, 2] {
         let _ = handle.push(Task::new(n)).await.unwrap();
     }
@@ -453,7 +455,7 @@ async fn shutdown_ends_the_poll_sleep_at_once() {
     .no_recovery()
     .build()
     .unwrap();
-    let (running, stop) = spawn(Monitor::new().register(queue).unwrap());
+    let (running, stop) = spawn(Monitor::new().register(queue).unwrap().0);
     assert!(until(SEC, || source.polls() >= 1).await);
     sleep(SEC).await;
     let at = Instant::now();
@@ -476,7 +478,7 @@ async fn own_ack_point_and_full_source() {
     .no_recovery()
     .build()
     .unwrap();
-    let handle = queue.handle();
+    let (_monitor, handle) = Monitor::new().register(queue).unwrap();
     let own = Task::new(1).with_ack_point(AckPoint::OnCompletion);
     assert!(matches!(
         handle.push(own).await.unwrap(),
@@ -521,6 +523,17 @@ impl Source for DeferringSource {
     async fn ack(&self, (): ()) -> Result<(), Infallible> {
         Ok(())
     }
+}
+
+/// Defer is part of the push contract: nothing is pushed in this test.
+impl PushSource for DeferringSource {
+    async fn push(&self, _: &TaskId, _: Vec<u8>) -> Result<PushResult, PushError<Infallible>> {
+        Ok(PushResult::Full)
+    }
+
+    async fn remove(&self, _: &TaskId) -> Result<Withdrawal, Infallible> {
+        Ok(Withdrawal::NotFound)
+    }
 
     async fn defer(
         &self,
@@ -552,7 +565,8 @@ async fn unknown_metadata_survives_a_defer() {
     .ack_point(AckPoint::OnCompletion)
     .build()
     .unwrap();
-    let (running, stop) = spawn(Monitor::new().register(queue).unwrap());
+    let (monitor, _handle) = Monitor::new().register(queue).unwrap();
+    let (running, stop) = spawn(monitor);
     assert!(until(SEC, || !source.deferred.lock().unwrap().is_empty()).await);
     let deferred: serde_json::Value =
         serde_json::from_slice(&source.deferred.lock().unwrap()[0]).unwrap();

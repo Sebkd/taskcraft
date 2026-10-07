@@ -15,14 +15,14 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use taskcraft::{
-    Attempt, BoxError, CancellationToken, JsonCodec, MetadataRegistry, Monitor, Outcome,
-    PollStrategy, PushOutcome, Queue, QueueHandle, Task, TaskId, TaskState, task_fn,
+    Attempt, BoxError, CancellationToken, Monitor, Outcome, PollStrategy, PushOutcome, Queue,
+    QueueHandle, Task, TaskId, TaskState, task_fn,
 };
-use taskcraft_postgres::{PgSource, PgStore};
+use taskcraft_postgres::PgStore;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
-type Handle = QueueHandle<PgSource, JsonCodec, String>;
+type Handle = QueueHandle<String>;
 
 const ALIVE: Duration = Duration::from_millis(500);
 
@@ -48,7 +48,7 @@ async fn start(
     (
         PgStore,
         Handle,
-        JoinHandle<Result<taskcraft::ShutdownReport, taskcraft::RecoveryError>>,
+        JoinHandle<Result<taskcraft::ShutdownReport, taskcraft::error::RecoveryError>>,
         CancellationToken,
     ),
     BoxError,
@@ -57,19 +57,18 @@ async fn start(
         .alive_interval(ALIVE)
         .connect(url)
         .await?;
-    let queue = Queue::builder(
+    let queue = Queue::on_store(
         queue_name,
         Arc::new(store.queue(queue_name)),
-        JsonCodec::new(MetadataRegistry::new()),
         task_fn(invoice),
     )
     .concurrency(4)
     // Other processes' work (and expired leases) shows up only on polls.
     .poll_strategy(PollStrategy::Interval(Duration::from_millis(200)))
     .build()?;
-    let handle = queue.handle();
     let stop = CancellationToken::new();
-    let running = tokio::spawn(Monitor::new().register(queue)?.run(stop.clone()));
+    let (monitor, handle) = Monitor::new().register(queue)?;
+    let running = tokio::spawn(monitor.run(stop.clone()));
     Ok((store, handle, running, stop))
 }
 

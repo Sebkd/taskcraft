@@ -20,6 +20,7 @@ use self::drain::stop_worker;
 use self::intake::Intake;
 use self::notices::spawn_listener;
 pub(crate) use self::pools::PoolClaim;
+use crate::backend::Backend;
 use crate::codec::Codec;
 use crate::handler::{SharedData, TaskRequest};
 use crate::metadata::MetadataRegistry;
@@ -30,7 +31,7 @@ use crate::poll::Poller;
 use crate::queue::{OverflowPolicy, Queue, TimeoutOutcome};
 use crate::registry::TaskRegistry;
 use crate::retry::RetryPolicy;
-use crate::source::{AckPointSupport, Source};
+use crate::source::AckPointSupport;
 use crate::task::Task;
 
 /// How a task left the worker, for the shutdown report.
@@ -57,7 +58,7 @@ enum Slot {
 }
 
 /// What every execution of a queue shares.
-struct ExecCtx<S: Source, C> {
+struct ExecCtx<S: Backend, C> {
     queue: Arc<str>,
     source: Arc<S>,
     codec: Arc<C>,
@@ -90,7 +91,7 @@ pub(crate) async fn run_worker<S, C, Svc, Args>(
     ctx: WorkerContext,
 ) -> QueueReport
 where
-    S: Source,
+    S: Backend,
     C: Codec<Args, S::Message>,
     Svc: tower::Service<TaskRequest<Args>, Response = Outcome> + Clone + Send + 'static,
     Svc::Error: Into<BoxError>,

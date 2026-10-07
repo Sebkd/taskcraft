@@ -13,9 +13,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use taskcraft::codec::IdentityCodec;
+use taskcraft::observe::{Event, MetricsObserver, Observer};
 use taskcraft::{
-    CancellationToken, Data, Event, IdentityCodec, InMemorySource, MetricsObserver, Monitor,
-    Observer, PushOutcome, Queue, QueueHandle, SharedData, Task, task_fn,
+    CancellationToken, Data, InMemorySource, Monitor, PushOutcome, Queue, QueueHandle, SharedData,
+    Task, task_fn,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::Notify;
@@ -104,9 +106,9 @@ async fn measure(iters: u64, concurrency: usize, extra: Extra, feed: Feed) -> Du
         Extra::Observer => monitor = monitor.observer(Finished::default()),
     }
     let queue = builder.build().unwrap();
-    let handle = queue.handle();
     let stop = CancellationToken::new();
-    let running = tokio::spawn(monitor.register(queue).unwrap().run(stop.clone()));
+    let (monitor, handle) = monitor.register(queue).unwrap();
+    let running = tokio::spawn(monitor.run(stop.clone()));
 
     let start = Instant::now();
     match feed {
@@ -132,7 +134,7 @@ async fn measure(iters: u64, concurrency: usize, extra: Extra, feed: Feed) -> Du
     elapsed
 }
 
-type Handle = QueueHandle<InMemorySource<u64>, IdentityCodec<u64>, u64>;
+type Handle = QueueHandle<u64>;
 
 async fn push(handle: &Handle, n: u64) {
     loop {

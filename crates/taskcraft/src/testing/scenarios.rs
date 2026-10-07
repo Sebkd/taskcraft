@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::handler::SharedData;
 use crate::metadata::MetadataRegistry;
 use crate::outcome::{BoxError, Outcome, TaskError};
-use crate::source::Source;
+use crate::source::PushSource;
 use crate::task::{Task, TaskId};
 use crate::testing::ledger::DeliveryLedger;
 use crate::testing::runner::{Runner, RunnerSetup, ScenarioHandler};
@@ -221,7 +221,7 @@ pub async fn cancel_during_retry_pause_stops_work(
 ///
 /// When the source has no wake-up signal, or a subscriber is not woken
 /// within a second.
-pub async fn wake_reaches_every_subscriber<S: Source>(
+pub async fn wake_reaches_every_subscriber<S: PushSource>(
     source: &S,
     id: &TaskId,
     message: S::Message,

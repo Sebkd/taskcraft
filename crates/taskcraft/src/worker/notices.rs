@@ -6,14 +6,15 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+use crate::backend::Backend;
 use crate::observe::{Event, Observers};
 use crate::registry::TaskRegistry;
-use crate::source::{Notice, Source};
+use crate::source::Notice;
 use crate::status::FinishReason;
 
 /// Cancel requests and lost leases from the source (rule 2.3.20 pp. 5, 7),
 /// when the source sends notices.
-pub(super) fn spawn_listener<S: Source>(
+pub(super) fn spawn_listener<S: Backend>(
     source: &S,
     tasks: &Arc<TaskRegistry>,
     queue: &Arc<str>,

@@ -9,6 +9,10 @@ use std::marker::PhantomData;
 use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
+
+pub use crate::attempt::{CatchPanic, catch_panic, outcome_of, run_attempt};
+pub use crate::outcome::IntoOutcome;
+pub use crate::runnable::HandlerOutput;
 use std::task::{Context, Poll};
 
 use serde::de::DeserializeOwned;
@@ -17,7 +21,6 @@ use tokio_util::sync::CancellationToken;
 use crate::error::MetadataError;
 use crate::metadata::MetadataRegistry;
 use crate::outcome::Outcome;
-use crate::runnable::HandlerOutput;
 use crate::status::FinishReason;
 use crate::task::{Task, TaskId};
 
@@ -296,7 +299,7 @@ impl<Args, T: Send + Sync + 'static> FromTask<Args> for Data<T> {
 
 /// A function usable as a handler: `async fn(Args, X1, …, Xn) -> R` with up
 /// to eight [`FromTask`] parameters and `R:` [`HandlerOutput`] — an outcome
-/// or a [`Run`](crate::Run) of a process.
+/// or a [`Run`](crate::runnable::Run) of a process.
 ///
 /// ```compile_fail
 /// // A handler must return (), Outcome or Result<_, TaskError>.

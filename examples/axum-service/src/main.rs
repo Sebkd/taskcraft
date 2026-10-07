@@ -22,12 +22,13 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use taskcraft::codec::IdentityCodec;
 use taskcraft::{
-    Cancel, CancelOutcome, CancellationToken, IdentityCodec, InMemorySource, Monitor, PushOutcome,
-    Queue, QueueHandle, Task, TaskId, task_fn,
+    Cancel, CancelOutcome, CancellationToken, InMemorySource, Monitor, PushOutcome, Queue,
+    QueueHandle, Task, TaskId, task_fn,
 };
 
-type Exports = QueueHandle<InMemorySource<String>, IdentityCodec<String>, String>;
+type Exports = QueueHandle<String>;
 
 /// An export: a minute of work, stopping early when cancelled.
 async fn export(table: String, cancel: Cancel) {
@@ -117,9 +118,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .concurrency(2)
     .no_recovery()
     .build()?;
-    let exports = queue.handle();
     let stop = CancellationToken::new();
-    let monitor = tokio::spawn(Monitor::new().register(queue)?.run(stop.clone()));
+    let (monitor, exports) = Monitor::new().register(queue)?;
+    let monitor = tokio::spawn(monitor.run(stop.clone()));
 
     let app = Router::new()
         .route("/exports", post(push))

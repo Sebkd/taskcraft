@@ -11,9 +11,9 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use taskcraft::codec::IdentityCodec;
 use taskcraft::{
-    Attempt, CancellationToken, IdentityCodec, InMemorySource, Monitor, Outcome, Queue,
-    RetryPolicy, Task, task_fn,
+    Attempt, CancellationToken, InMemorySource, Monitor, Outcome, Queue, RetryPolicy, Task, task_fn,
 };
 use tokio::time::{Instant, sleep};
 
@@ -62,9 +62,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
     .no_recovery()
     .build()?;
-    let handle = queue.handle();
     let stop = CancellationToken::new();
-    let running = tokio::spawn(Monitor::new().register(queue)?.run(stop.clone()));
+    let (monitor, handle) = Monitor::new().register(queue)?;
+    let running = tokio::spawn(monitor.run(stop.clone()));
 
     for order in 1..=4 {
         let _ = handle.push(Task::new(order)).await?;

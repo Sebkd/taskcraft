@@ -57,7 +57,8 @@ async fn scenario(trace_parent: Option<&str>) {
         .restart_delays(SEC, SEC)
         .unwrap()
         .register(queue)
-        .unwrap();
+        .unwrap()
+        .0;
     let stop = CancellationToken::new();
     let running = tokio::spawn(monitor.run(stop.clone()));
     for n in 0..4 {

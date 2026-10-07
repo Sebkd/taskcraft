@@ -10,9 +10,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use taskcraft::codec::IdentityCodec;
+use taskcraft::observe::{Event, Observer};
+use taskcraft::runnable::{Run, Runnable};
 use taskcraft::{
-    CancelOutcome, CancellationToken, Event, IdentityCodec, InMemorySource, Monitor, Observer,
-    Outcome, Queue, Run, Runnable, Task, TaskId, TaskState, task_fn,
+    CancelOutcome, CancellationToken, InMemorySource, Monitor, Outcome, Queue, Task, TaskId,
+    TaskState, task_fn,
 };
 use tokio::sync::oneshot;
 
@@ -96,14 +99,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .concurrency(2)
     .no_recovery()
     .build()?;
-    let handle = queue.handle();
     let stop = CancellationToken::new();
-    let running = tokio::spawn(
-        Monitor::new()
-            .observer(Arc::clone(&finals))
-            .register(queue)?
-            .run(stop.clone()),
-    );
+    let (monitor, handle) = Monitor::new()
+        .observer(Arc::clone(&finals))
+        .register(queue)?;
+    let running = tokio::spawn(monitor.run(stop.clone()));
 
     let _ = handle.push(Task::new(1_000).with_id("small")).await?;
     let _ = handle.push(Task::new(1_000_000).with_id("huge")).await?;

@@ -14,9 +14,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use metrics_exporter_prometheus::PrometheusBuilder;
+use taskcraft::codec::IdentityCodec;
+use taskcraft::observe::{Event, MetricsObserver, Observer};
 use taskcraft::{
-    AckPoint, Attempt, CancellationToken, Event, IdentityCodec, InMemorySource, MetricsObserver,
-    Monitor, Observer, Outcome, Queue, RetryPolicy, Task, task_fn,
+    AckPoint, Attempt, CancellationToken, InMemorySource, Monitor, Outcome, Queue, RetryPolicy,
+    Task, task_fn,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -77,8 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..RetryPolicy::default()
     })
     .build()?;
-    let handle = queue.handle();
-    let monitor = Monitor::new()
+    let (monitor, handle) = Monitor::new()
         .observer(MetricsObserver::new())
         .observer(Arc::clone(&own))
         .register(queue)?;

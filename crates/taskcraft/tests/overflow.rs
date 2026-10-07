@@ -8,10 +8,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use taskcraft::error::ConfigError;
 use taskcraft::testing::{FaultyCodec, FaultySource};
 use taskcraft::{
-    CancellationToken, ConfigError, Monitor, Outcome, Queue, ShutdownReport, StopReason, Task,
-    TaskError, TaskId, task_fn,
+    CancellationToken, Monitor, Outcome, Queue, ShutdownReport, StopReason, Task, TaskError,
+    TaskId, task_fn,
 };
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
@@ -83,7 +84,8 @@ async fn waiting_tasks_do_not_block_intake() {
         Monitor::new()
             .shutdown_timeout(Duration::ZERO)
             .register(queue)
-            .unwrap(),
+            .unwrap()
+            .0,
     );
     for n in 0..4 {
         source.enqueue(Task::new(n));
@@ -120,7 +122,8 @@ async fn full_waiting_room_stops_polling() {
         Monitor::new()
             .shutdown_timeout(Duration::ZERO)
             .register(queue)
-            .unwrap(),
+            .unwrap()
+            .0,
     );
     for n in 0..3 {
         source.enqueue(Task::new(n));
@@ -165,7 +168,8 @@ async fn reject_hands_the_task_to_the_hook() {
         Monitor::new()
             .shutdown_timeout(Duration::ZERO)
             .register(queue)
-            .unwrap(),
+            .unwrap()
+            .0,
     );
     source.enqueue(Task::new(0).with_id("runs"));
     assert!(until(SEC, || get(&started) == 1).await);
@@ -205,7 +209,8 @@ async fn shutdown_interrupts_restart_and_slot_wait() {
         .restart_delays(60 * SEC, 60 * SEC)
         .unwrap()
         .register(queue)
-        .unwrap();
+        .unwrap()
+        .0;
     let (monitor, stop) = spawn(monitor);
     source.enqueue(Task::new(0));
     source.enqueue(Task::new(1));
@@ -250,7 +255,8 @@ async fn every_outcome_frees_the_slot_and_the_pool() {
             .pool("unzip", 1)
             .unwrap()
             .register(queue)
-            .unwrap(),
+            .unwrap()
+            .0,
     );
     for n in 0..6 {
         source.enqueue(Task::new(n));
@@ -286,7 +292,8 @@ async fn shutdown_cancels_a_task_waiting_for_a_pool() {
         .pool("pack", 1)
         .unwrap()
         .register(queue)
-        .unwrap();
+        .unwrap()
+        .0;
     let (monitor, stop) = spawn(monitor);
     source.enqueue(Task::new(0));
     source.enqueue(Task::new(1));
@@ -347,8 +354,10 @@ async fn crossed_pool_sets_do_not_deadlock() {
         .unwrap()
         .register(queue_ab)
         .unwrap()
+        .0
         .register(queue_ba)
-        .unwrap();
+        .unwrap()
+        .0;
     let (monitor, stop) = spawn(monitor);
     for n in 0..3 {
         first.enqueue(Task::new(n));

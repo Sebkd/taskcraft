@@ -12,14 +12,16 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
+use crate::backend::HandleKind;
 use crate::codec::Codec;
 use crate::error::{ConfigError, RecoveryError};
+use crate::handle::{HandleCore, Ports};
 use crate::handler::{BoxFuture, TaskRequest};
-use crate::observe::{Observer, Observers};
+use crate::observe::{Observer, ObserverCell, Observers};
 use crate::outcome::{BoxError, Outcome};
 use crate::queue::Queue;
 use crate::registry::TaskRegistry;
-use crate::source::{CloseReason, Source};
+use crate::source::CloseReason;
 use crate::worker::{PoolClaim, run_worker};
 
 /// Why a queue's worker stopped.
@@ -119,6 +121,8 @@ type StartFn = Box<dyn FnOnce() -> BoxFuture<'static, Result<WorkerFn, BoxError>
 struct Registered {
     name: String,
     tasks: Arc<TaskRegistry>,
+    /// Filled with the monitor's observers when it runs (rule 2.3.22 p. 2).
+    observers: ObserverCell,
     start: StartFn,
 }
 
@@ -126,8 +130,9 @@ struct Registered {
 ///
 /// ```no_run
 /// use std::sync::Arc;
-/// use taskcraft::{CancellationToken, IdentityCodec, InMemorySource, Monitor, Queue, task_fn};
-/// # async fn example() -> Result<(), taskcraft::ConfigError> {
+/// use taskcraft::codec::IdentityCodec;
+/// use taskcraft::{CancellationToken, InMemorySource, Monitor, Queue, Task, task_fn};
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// async fn send_report(month: String) {}
 ///
 /// let source = Arc::new(InMemorySource::default());
@@ -135,8 +140,12 @@ struct Registered {
 ///     .concurrency(4)
 ///     .no_recovery()
 ///     .build()?;
+/// let (monitor, reports) = Monitor::new().register(queue)?;
 /// let stop = CancellationToken::new();
-/// let report = Monitor::new().register(queue)?.run(stop).await;
+/// let running = tokio::spawn(monitor.run(stop.clone()));
+/// let _ = reports.push(Task::new("2026-10".to_owned())).await?;
+/// stop.cancel();
+/// let report = running.await??;
 /// # let _ = report;
 /// # Ok(()) }
 /// ```
@@ -222,16 +231,20 @@ impl Monitor {
     }
 
     /// Adds an observer of every event of this monitor's queues (rule
-    /// 2.3.22), such as `MetricsObserver` with the `metrics` feature. Add
-    /// observers before registering queues: a queue gets the observers added
-    /// so far.
+    /// 2.3.22), such as `MetricsObserver` with the `metrics` feature. The
+    /// order of `observer` and [`register`](Self::register) calls does not
+    /// matter: queues get the observers when the monitor runs.
     #[must_use]
     pub fn observer(mut self, observer: impl Observer) -> Self {
         self.observers.push(Arc::new(observer));
         self
     }
 
-    /// Registers a queue.
+    /// Registers a queue and returns the monitor with the queue's handle:
+    /// a [`QueueHandle`](crate::QueueHandle) for queues built with
+    /// [`Queue::builder`] and [`Queue::on_store`], a
+    /// [`ConsumerHandle`](crate::ConsumerHandle) for
+    /// [`Queue::consumer`].
     ///
     /// # Errors
     ///
@@ -240,13 +253,13 @@ impl Monitor {
     /// [`ConfigError::PermitsExceedPool`] or [`ConfigError::InvalidPool`]
     /// when the queue requires a pool the monitor does not have, more permits
     /// than the pool holds, or zero permits.
-    pub fn register<S, C, Svc, Args>(
+    pub fn register<B, C, Svc, Args>(
         mut self,
-        queue: Queue<S, C, Svc, Args>,
-    ) -> Result<Self, ConfigError>
+        queue: Queue<B, C, Svc, Args>,
+    ) -> Result<(Self, B::Handle), ConfigError>
     where
-        S: Source,
-        C: Codec<Args, S::Message>,
+        B: HandleKind<Args>,
+        C: Codec<Args, B::Message>,
         Svc: tower::Service<TaskRequest<Args>, Response = Outcome> + Clone + Send + 'static,
         Svc::Error: Into<BoxError>,
         Svc::Future: Send,
@@ -279,10 +292,19 @@ impl Monitor {
         }
         self.names.insert(name.clone());
         let mut queue = queue;
-        // A queue is registered once: it keeps this monitor's observers.
-        let _ = queue.observers.set(Observers::new(self.observers.clone()));
+        let port = Ports {
+            backend: Arc::clone(&queue.source),
+            codec: Arc::clone(&queue.codec),
+        };
+        let handle = B::handle(HandleCore::new(
+            &name,
+            Arc::new(port),
+            Arc::clone(&queue.tasks),
+            Arc::clone(&queue.observers),
+        ));
         let hook = queue.recovery.take();
         let tasks = Arc::clone(&queue.tasks);
+        let observers = Arc::clone(&queue.observers);
         let queue_name = name.clone();
         let start: StartFn = Box::new(move || {
             Box::pin(async move {
@@ -305,8 +327,13 @@ impl Monitor {
                 Ok(worker)
             })
         });
-        self.queues.push(Registered { name, tasks, start });
-        Ok(self)
+        self.queues.push(Registered {
+            name,
+            tasks,
+            observers,
+            start,
+        });
+        Ok((self, handle))
     }
 
     /// Runs the recovery hooks, then every registered queue until `stop`
@@ -328,7 +355,16 @@ impl Monitor {
         let mut started = Vec::with_capacity(self.queues.len());
         let mut names = Vec::with_capacity(self.queues.len());
         let mut registries = Vec::with_capacity(self.queues.len());
-        for Registered { name, tasks, start } in self.queues {
+        // Every observer reaches every queue, whatever the order they were
+        // added in (rule 2.3.22 p. 2).
+        let observers = Observers::new(self.observers);
+        for queue in &self.queues {
+            let _ = queue.observers.set(observers.clone());
+        }
+        for Registered {
+            name, tasks, start, ..
+        } in self.queues
+        {
             let result = tokio::select! {
                 biased;
                 () = stop.cancelled() => None,
@@ -485,11 +521,8 @@ mod tests {
             .build()
             .unwrap()
         };
-        let err = Monitor::new()
-            .register(queue())
-            .unwrap()
-            .register(queue())
-            .unwrap_err();
+        let (monitor, _reports) = Monitor::new().register(queue()).unwrap();
+        let err = monitor.register(queue()).unwrap_err();
         assert_eq!(err.to_string(), "duplicate queue name: reports");
     }
 }

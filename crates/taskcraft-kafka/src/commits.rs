@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use taskcraft::OffsetTracker;
+use taskcraft::source::OffsetTracker;
 
 /// Identifies one delivery: its partition, offset and the assignment of the
 /// partition it came from.

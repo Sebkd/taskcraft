@@ -10,9 +10,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use taskcraft::codec::IdentityCodec;
 use taskcraft::{
-    CancellationToken, Data, IdentityCodec, InMemorySource, Monitor, PushOutcome, Queue,
-    SharedData, Task, task_fn,
+    CancellationToken, Data, InMemorySource, Monitor, PushOutcome, Queue, SharedData, Task, task_fn,
 };
 use tokio::time::sleep;
 
@@ -36,9 +36,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .shared_data(shared)
     .no_recovery()
     .build()?;
-    let handle = queue.handle();
     let stop = CancellationToken::new();
-    let running = tokio::spawn(Monitor::new().register(queue)?.run(stop.clone()));
+    let (monitor, handle) = Monitor::new().register(queue)?;
+    let running = tokio::spawn(monitor.run(stop.clone()));
 
     // The id says what the task is: one report per month.
     let report = || Task::new("2026-10".to_owned()).with_id("report-2026-10");
