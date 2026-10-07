@@ -82,7 +82,9 @@ async fn main() -> Result<(), BoxError> {
         Arc::new(store_b.queue(&queue_name)),
         task_fn(transfer_on_b),
     )
-    // Other processes' work (and expired leases) shows up only on polls.
+    // Pushes wake the workers of every process (LISTEN/NOTIFY), but an
+    // expired lease is noticed only by a poll: a short interval shows the
+    // takeover quickly.
     .poll_strategy(PollStrategy::Interval(Duration::from_millis(200)))
     .build()?;
     let stop_b = CancellationToken::new();

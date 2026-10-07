@@ -5,11 +5,11 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgListener, PgPoolOptions};
 use sqlx::{PgConnection, PgPool};
 use taskcraft::TaskId;
 use taskcraft::error::ConfigError;
-use taskcraft::source::Notice;
+use taskcraft::source::{Notice, WakeHandle};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
@@ -81,6 +81,7 @@ pub struct PgStoreBuilder {
     cleanup_interval: Duration,
     cleanup_batch: u32,
     stale_owner_warning: Duration,
+    notifications: bool,
 }
 
 impl PgStoreBuilder {
@@ -115,6 +116,17 @@ impl PgStoreBuilder {
     /// while full, each in a short transaction. Default 1000.
     pub fn cleanup_batch(mut self, batch: u32) -> Self {
         self.cleanup_batch = batch;
+        self
+    }
+
+    /// Wakes the workers of every process at once when work appears in
+    /// their queue — a push, a requeue, tasks given back — through
+    /// `LISTEN`/`NOTIFY` on one more connection; the poll strategy stays a
+    /// safety net. Default on. Turn it off behind a connection pooler in
+    /// transaction mode, where `LISTEN` does not work: workers then see the
+    /// work of other processes on their next poll.
+    pub fn notifications(mut self, on: bool) -> Self {
+        self.notifications = on;
         self
     }
 
@@ -194,7 +206,7 @@ impl PgStoreBuilder {
         self.validate()?;
         migrate(&pool).await?;
         claim_process_id(&pool, &self.process_id, self.alive_interval).await?;
-        give_back(&pool, &self.process_id).await?;
+        give_back(&pool, &self.process_id, self.notifications).await?;
         if self.lease.is_none() {
             warn_stale_owners(&pool, &self.process_id, self.stale_owner_warning).await?;
         }
@@ -206,14 +218,20 @@ impl PgStoreBuilder {
             alive_interval: self.alive_interval,
             cleanup_interval: self.cleanup_interval,
             cleanup_batch: self.cleanup_batch,
+            notifications: self.notifications,
             queues: Mutex::default(),
             upkeep: Mutex::default(),
         });
         let tick = self.lease.map_or(self.alive_interval, |l| {
             l.heartbeat.min(self.alive_interval)
         });
-        let handle = tokio::spawn(upkeep(Arc::downgrade(&shared), tick));
-        *lock(&shared.upkeep) = Some(handle);
+        let mut tasks = vec![tokio::spawn(upkeep(Arc::downgrade(&shared), tick))];
+        if self.notifications {
+            let mut listener = PgListener::connect_with(&shared.pool).await?;
+            listener.listen(CHANNEL).await?;
+            tasks.push(tokio::spawn(listen(Arc::downgrade(&shared), listener)));
+        }
+        *lock(&shared.upkeep) = tasks;
         Ok(PgStore { shared })
     }
 }
@@ -240,6 +258,7 @@ impl PgStore {
             cleanup_interval: Duration::from_secs(60),
             cleanup_batch: 1000,
             stale_owner_warning: Duration::from_secs(3600),
+            notifications: true,
         }
     }
 
@@ -251,6 +270,7 @@ impl PgStore {
         let held = Arc::new(Held {
             tasks: Mutex::default(),
             notify,
+            wake: WakeHandle::new(),
         });
         lock(&self.shared.queues).insert(Arc::clone(&name), Arc::clone(&held));
         PgSource::new(Arc::clone(&self.shared), name, held, notices)
@@ -294,6 +314,9 @@ impl PgStore {
         }
         let queues = return_tasks(&mut tx, process_id).await?;
         tx.commit().await?;
+        for (queue, _) in &queues {
+            announce(shared, queue).await;
+        }
         let count: i64 = queues.iter().map(|(_, n)| n).sum();
         info!(
             event = "recovery",
@@ -322,6 +345,9 @@ pub(crate) struct Held {
     /// Task id → a cancel request was already reported.
     pub(crate) tasks: Mutex<HashMap<TaskId, bool>>,
     pub(crate) notify: mpsc::UnboundedSender<Notice>,
+    /// Wakes the queue's workers: on a push from this process, and on a
+    /// notification from any.
+    pub(crate) wake: WakeHandle,
 }
 
 #[derive(Debug)]
@@ -333,13 +359,15 @@ pub(crate) struct Shared {
     alive_interval: Duration,
     cleanup_interval: Duration,
     cleanup_batch: u32,
+    notifications: bool,
     queues: Mutex<HashMap<Arc<str>, Arc<Held>>>,
-    upkeep: Mutex<Option<JoinHandle<()>>>,
+    /// Upkeep and the notification listener, stopped with the store.
+    upkeep: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl Drop for Shared {
     fn drop(&mut self) {
-        if let Some(handle) = lock(&self.upkeep).take() {
+        for handle in lock(&self.upkeep).drain(..) {
             handle.abort();
         }
     }
@@ -462,12 +490,75 @@ async fn return_tasks(
     .await
 }
 
+/// The channel of the "work appeared in queue <payload>" notifications.
+const CHANNEL: &str = "taskcraft_tasks";
+
+/// Tells every process listening that queue `queue` has work now (rule
+/// 2.3.25 p. 6). Best effort: polling picks the work up anyway.
+pub(crate) async fn announce(shared: &Shared, queue: &str) {
+    if shared.notifications {
+        let _ = notify(&shared.pool, queue).await;
+    }
+}
+
+async fn notify(pool: &PgPool, queue: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(CHANNEL)
+        .bind(queue)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Wakes the workers of the queue named in each notification. A lost
+/// connection loses notifications: every queue is woken, and the listener
+/// reconnects on the next receive.
+async fn listen(shared: Weak<Shared>, mut listener: PgListener) {
+    loop {
+        let received = listener.try_recv().await;
+        let Some(shared) = shared.upgrade() else {
+            return;
+        };
+        let error = match received {
+            Ok(Some(notification)) => {
+                if let Some(held) = lock(&shared.queues).get(notification.payload()) {
+                    held.wake.wake();
+                }
+                continue;
+            }
+            Ok(None) => "connection lost".to_owned(),
+            Err(sqlx::Error::PoolClosed) => return,
+            Err(error) => error.to_string(),
+        };
+        warn!(
+            event = "source",
+            action = "notify_lost",
+            "task store notifications lost, reconnecting: process_id={}, error={:?}",
+            shared.process_id,
+            error
+        );
+        for held in lock(&shared.queues).values() {
+            held.wake.wake();
+        }
+        drop(shared);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
 /// Tasks this process held when it stopped go back to their queues with
 /// their attempt counts (rule 2.3.19 p. 1).
-async fn give_back(pool: &PgPool, process_id: &str) -> Result<(), sqlx::Error> {
+async fn give_back(
+    pool: &PgPool,
+    process_id: &str,
+    notifications: bool,
+) -> Result<(), sqlx::Error> {
     let mut conn = pool.acquire().await?;
     let queues = return_tasks(&mut conn, process_id).await?;
+    drop(conn);
     for (queue, count) in queues {
+        if notifications {
+            let _ = notify(pool, &queue).await;
+        }
         info!(
             event = "recovery",
             action = "recovered",
@@ -688,6 +779,7 @@ mod tests {
         let held = Held {
             tasks: Mutex::new(tasks),
             notify,
+            wake: WakeHandle::new(),
         };
         (held, receiver)
     }
