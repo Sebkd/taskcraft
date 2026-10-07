@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use super::drain::joined_id;
-use super::execute::{execute, settle};
+use super::execute::{Delivered, execute, settle};
 use super::{ExecCtx, Slot, TaskEnd};
 use crate::backend::Backend;
 use crate::codec::{Codec, CodecError};
@@ -23,7 +23,7 @@ use crate::monitor::{StopReason, WorkerContext};
 use crate::observe::{Event, Observers};
 use crate::outcome::{BoxError, Outcome};
 use crate::poll::{Poller, Wakeup};
-use crate::queue::{DeadLetter, DeadLetterHook, RejectFn};
+use crate::queue::{DeadLetter, DeadLetterHook, FailedFn, RejectFn};
 use crate::registry::TaskRegistry;
 use crate::source::{Completion, Polled, WakeSignal};
 use crate::state::TaskState;
@@ -56,6 +56,7 @@ pub(super) struct Intake<S: Backend, C, Svc, Args> {
     pub(super) slots: Arc<Semaphore>,
     pub(super) waiting_room: Arc<Semaphore>,
     pub(super) reject: Option<RejectFn<Args>>,
+    pub(super) failed: Option<FailedFn<Args>>,
     pub(super) running: JoinSet<TaskEnd>,
     pub(super) ids: HashMap<tokio::task::Id, TaskId>,
     /// The parent of every task's cancel flag.
@@ -376,11 +377,11 @@ where
         let task_id = task.id().clone();
         let handle = self.running.spawn(execute(
             task,
-            receipt,
-            ack_later,
+            Delivered { receipt, ack_later },
             self.service.clone(),
             cancel,
             slot,
+            self.failed.clone(),
             Arc::clone(&self.exec),
         ));
         self.ids.insert(handle.id(), task_id);

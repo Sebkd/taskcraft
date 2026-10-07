@@ -10,8 +10,8 @@ use tokio::time::Instant;
 use crate::handle::{ConsumerHandle, HandleCore, QueueHandle};
 use crate::source::{
     AckPointSupport, Capabilities, Completion, Consumed, DeferError, Notices, Polled, Progress,
-    PushError, PushResult, PushSource, Pushed, Source, StoreMessage, Stored, TaskStore, WakeSignal,
-    Withdrawal,
+    PushError, PushResult, PushSource, Pushed, Requeue, Source, StoreMessage, Stored, TaskStore,
+    WakeSignal, Withdrawal,
 };
 use crate::status::TaskStatus;
 use crate::task::TaskId;
@@ -62,6 +62,9 @@ pub trait Backend: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Option<TaskStatus>, Self::Error>> + Send;
 
     fn remove(&self, id: &TaskId) -> impl Future<Output = Result<Withdrawal, Self::Error>> + Send;
+
+    /// Queues a failed task again; only a task store keeps one.
+    fn requeue(&self, id: &TaskId) -> impl Future<Output = Result<Requeue, Self::Error>> + Send;
 
     /// Only reached through a [`QueueHandle`], which consumed streams do not
     /// have.
@@ -144,6 +147,10 @@ impl<S: Source> Backend for Consumed<S> {
         Ok(Withdrawal::NotFound)
     }
 
+    async fn requeue(&self, _: &TaskId) -> Result<Requeue, S::Error> {
+        Ok(Requeue::NotFound)
+    }
+
     async fn push(&self, _: &TaskId, _: S::Message) -> Result<PushResult, PushError<S::Error>> {
         Err(PushError::Closed)
     }
@@ -220,6 +227,10 @@ impl<S: PushSource> Backend for Pushed<S> {
 
     fn remove(&self, id: &TaskId) -> impl Future<Output = Result<Withdrawal, S::Error>> + Send {
         self.0.remove(id)
+    }
+
+    async fn requeue(&self, _: &TaskId) -> Result<Requeue, S::Error> {
+        Ok(Requeue::NotFound)
     }
 
     fn push(
@@ -311,6 +322,10 @@ impl<S: TaskStore> Backend for Stored<S> {
 
     fn remove(&self, id: &TaskId) -> impl Future<Output = Result<Withdrawal, S::Error>> + Send {
         self.0.remove(id)
+    }
+
+    fn requeue(&self, id: &TaskId) -> impl Future<Output = Result<Requeue, S::Error>> + Send {
+        self.0.requeue(id)
     }
 
     fn push(

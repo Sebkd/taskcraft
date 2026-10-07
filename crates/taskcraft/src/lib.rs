@@ -161,7 +161,7 @@ pub use metadata::{Metadata, MetadataRegistry, TRACE_PARENT, TraceParent};
 pub use monitor::{Monitor, QueueReport, ShutdownReport, StopReason};
 pub use outcome::{BoxError, ErrorKind, Outcome, ResultExt, TaskError};
 pub use poll::PollStrategy;
-pub use queue::{DeadLetter, Queue, QueueBuilder, TimeoutOutcome};
+pub use queue::{DeadLetter, FailedTask, Queue, QueueBuilder, TimeoutOutcome};
 pub use retry::RetryPolicy;
 pub use state::{Lifecycle, TaskState};
 pub use status::{FinishReason, PushOutcome, RejectReason, TaskStatus};

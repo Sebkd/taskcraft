@@ -191,6 +191,21 @@ pub enum Withdrawal {
     NotFound,
 }
 
+/// What a task store did with a request to run a failed task again (rule
+/// 2.3.26).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+#[must_use]
+pub enum Requeue {
+    /// The failed or panicked task is queued again.
+    Requeued,
+    /// The task is not failed or panicked: it is live, succeeded or
+    /// cancelled.
+    NotFailed(TaskState),
+    /// The store holds no such task.
+    NotFound,
+}
+
 /// How a task ended, for a source that records it (spec 2.3.9 p. 6).
 #[derive(Debug, Clone, Copy)]
 pub struct Completion<'a> {
@@ -507,6 +522,14 @@ pub trait TaskStore: Send + Sync + 'static {
         &self,
         id: &TaskId,
     ) -> impl Future<Output = Result<Option<TaskStatus>, Self::Error>> + Send;
+
+    /// Queues a failed or panicked task again (rule 2.3.26): its retries
+    /// start over, its attempt number goes on. The default holds no such
+    /// task.
+    fn requeue(&self, id: &TaskId) -> impl Future<Output = Result<Requeue, Self::Error>> + Send {
+        let _ = id;
+        async { Ok(Requeue::NotFound) }
+    }
 
     /// A wake-up signal, if the store can tell when work arrives.
     fn subscribe(&self) -> Option<WakeSignal> {

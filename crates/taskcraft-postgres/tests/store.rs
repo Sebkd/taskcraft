@@ -8,6 +8,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+use taskcraft::error::RequeueError;
 use taskcraft::source::{Notice, Polled, StoreMessage, TaskStore};
 use taskcraft::{
     Attempt, Cancel, CancelOutcome, CancellationToken, FinishReason, Monitor, Outcome, PushOutcome,
@@ -468,4 +469,65 @@ async fn delayed_push_waits_for_its_moment() {
         SystemTime::now() + Duration::from_millis(500) >= at,
         "taken before its moment"
     );
+}
+
+/// Change failed-tasks, criteria 3 and 4: a failed task is queued again and
+/// runs with the next attempt number; a task that did not fail is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_task_is_requeued() {
+    let Some(url) = url() else { return };
+    let name = unique("q");
+    let store = store(&url, &unique("p"), false).await;
+    let seen: Arc<Mutex<Vec<(u32, u32)>>> = Arc::default();
+    let (monitor, handle) = queue(&name, store.queue(&name), &seen);
+    let (running, stop) = run(monitor);
+
+    for (id, n) in [("failed", 1), ("done", 0)] {
+        let _ = handle.push(Task::new(n).with_id(id)).await.unwrap();
+    }
+    assert!(
+        until(10 * SEC, async || state(&handle, "failed").await
+            == Some(TaskState::Failed))
+        .await
+    );
+    assert!(
+        until(10 * SEC, async || state(&handle, "done").await
+            == Some(TaskState::Succeeded))
+        .await
+    );
+    handle.requeue(&TaskId::new("failed")).await.unwrap();
+    assert!(until(10 * SEC, async || seen.lock().unwrap().contains(&(1, 2))).await);
+    assert!(
+        until(10 * SEC, async || state(&handle, "failed").await
+            == Some(TaskState::Failed))
+        .await
+    );
+    let status = handle
+        .fetch_status(&TaskId::new("failed"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((status.attempt(), status.retries()), (2, 0));
+
+    let done = handle.requeue(&TaskId::new("done")).await;
+    assert!(
+        matches!(done, Err(RequeueError::NotFailed(TaskState::Succeeded))),
+        "{done:?}"
+    );
+    let _ = handle.push(Task::new(4).with_id("long")).await.unwrap();
+    assert!(
+        until(10 * SEC, async || state(&handle, "long").await
+            == Some(TaskState::Running))
+        .await
+    );
+
+    let long = handle.requeue(&TaskId::new("long")).await;
+    assert!(
+        matches!(long, Err(RequeueError::NotFailed(TaskState::Running))),
+        "{long:?}"
+    );
+    let unknown = handle.requeue(&TaskId::new("never-pushed")).await;
+    assert!(matches!(unknown, Err(RequeueError::Unknown)), "{unknown:?}");
+    stop.cancel();
+    running.await.unwrap();
 }

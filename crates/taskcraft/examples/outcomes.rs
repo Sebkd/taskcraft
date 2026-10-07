@@ -1,5 +1,6 @@
 //! E-2 `outcomes` — every outcome a handler can give: success, retry with a
-//! pause, abort, defer and panic; the attempt count (spec 2.3.2–2.3.6).
+//! pause, abort, defer and panic; the attempt count; failed tasks handed to
+//! a hook, as to an error topic (spec 2.3.2–2.3.6, 2.3.26).
 //!
 //! Runs on virtual time: pauses of seconds pass at once.
 //!
@@ -14,8 +15,8 @@ use std::time::Duration;
 use taskcraft::codec::IdentityCodec;
 use taskcraft::observe::{Event, Observer};
 use taskcraft::{
-    AckPoint, Attempt, CancellationToken, InMemorySource, Monitor, Outcome, Queue, RetryPolicy,
-    Task, TaskError, TaskState, task_fn,
+    AckPoint, Attempt, CancellationToken, FailedTask, InMemorySource, Monitor, Outcome, Queue,
+    RetryPolicy, Task, TaskError, TaskState, task_fn,
 };
 
 /// What each task does, by name.
@@ -23,6 +24,7 @@ async fn work(name: String, Attempt(attempt): Attempt) -> Result<Outcome, TaskEr
     println!("  {name}: attempt {attempt}");
     Ok(match name.as_str() {
         "flaky" if attempt < 3 => Outcome::retry("the upstream is busy"),
+        "hopeless" => Outcome::retry("the upstream is gone"),
         // A classified error: `?` on it would also abort.
         "bad-input" => return Err(TaskError::abort("the month is not a month")),
         "later" if attempt == 1 => {
@@ -66,6 +68,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("(the panic message printed below is the point of task \"boom\")");
     let source = Arc::new(InMemorySource::default());
     let finals = Arc::new(Finals::default());
+    // Failed and panicked tasks, as an error topic would get them.
+    let error_topic: Arc<Mutex<Vec<String>>> = Arc::default();
+    let errors = Arc::clone(&error_topic);
     let queue = Queue::builder(
         "outcomes",
         Arc::clone(&source),
@@ -79,6 +84,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         base: Duration::from_secs(1),
         ..RetryPolicy::default()
     })
+    .failed_task(move |failed: FailedTask<String>| {
+        println!(
+            "  to the error topic: {} ({}, attempt {})",
+            failed.task.id(),
+            failed.reason,
+            failed.task.attempt()
+        );
+        if let Ok(mut errors) = errors.lock() {
+            errors.push(failed.task.into_args());
+        }
+    })
     .build()?;
     let (monitor, handle) = Monitor::new()
         .observer(Arc::clone(&finals))
@@ -86,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stop = CancellationToken::new();
     let running = tokio::spawn(monitor.run(stop.clone()));
 
-    for name in ["ok", "flaky", "bad-input", "later", "boom"] {
+    for name in ["ok", "flaky", "hopeless", "bad-input", "later", "boom"] {
         let _ = handle
             .push(Task::new(name.to_owned()).with_id(name))
             .await?;
@@ -103,6 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("bad-input", TaskState::Failed),
         ("boom", TaskState::Panicked),
         ("flaky", TaskState::Succeeded),
+        ("hopeless", TaskState::Failed),
         ("later", TaskState::Succeeded),
         ("ok", TaskState::Succeeded),
     ];
@@ -110,6 +127,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if finals.get(name) != Some(&state) {
             return Err(format!("{name}: expected {state}, got {:?}", finals.get(name)).into());
         }
+    }
+    let mut errors = error_topic.lock().map_err(|_| "hook poisoned")?.clone();
+    errors.sort();
+    if errors != ["bad-input", "boom", "hopeless"] {
+        return Err(format!("unexpected error topic: {errors:?}").into());
     }
     println!("every outcome as expected");
     Ok(())
