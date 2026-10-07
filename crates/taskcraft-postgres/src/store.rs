@@ -15,40 +15,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::source::PgSource;
-
-// In the queries below, a process holds tasks in 'accepted', 'running' and
-// 'retry_waiting' until it finishes them; 'succeeded', 'failed', 'panicked'
-// and 'cancelled' are final and kept for the retention period.
-
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS taskcraft_tasks (
-    queue            text        NOT NULL,
-    id               text        NOT NULL,
-    task             jsonb       NOT NULL,
-    state            text        NOT NULL,
-    attempt          integer     NOT NULL DEFAULT 0,
-    retries          integer     NOT NULL DEFAULT 0,
-    cancel_requested boolean     NOT NULL DEFAULT false,
-    next_delivery    timestamptz,
-    owner            text,
-    lease_until      timestamptz,
-    reason           jsonb,
-    created_at       timestamptz NOT NULL DEFAULT now(),
-    updated_at       timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (queue, id)
-);
-CREATE INDEX IF NOT EXISTS taskcraft_tasks_ready
-    ON taskcraft_tasks (queue, state, next_delivery, created_at);
-CREATE INDEX IF NOT EXISTS taskcraft_tasks_owner
-    ON taskcraft_tasks (owner) WHERE owner IS NOT NULL;
-CREATE TABLE IF NOT EXISTS taskcraft_processes (
-    id      text        PRIMARY KEY,
-    seen_at timestamptz NOT NULL
-);
-";
-
-/// Serialises schema creation between processes starting together.
-const SCHEMA_LOCK: i64 = 0x7461_736b_6372_6166;
+use crate::sql::{CLEANUP_BATCH, MIGRATIONS, SCHEMA_LOCK};
 
 /// What the store can fail with.
 #[derive(Debug, thiserror::Error)]
@@ -60,6 +27,9 @@ pub enum PgStoreError {
     /// The database failed or is unreachable.
     #[error(transparent)]
     Database(#[from] sqlx::Error),
+    /// The cleanup batch is zero.
+    #[error("cleanup batch must be at least 1")]
+    InvalidCleanupBatch,
     /// The process id is empty.
     #[error("task store requires a process id")]
     EmptyProcessId,
@@ -69,6 +39,15 @@ pub enum PgStoreError {
     /// A stored task or status could not be read.
     #[error("stored data could not be read: {0}")]
     Data(String),
+    /// The database has a newer schema than this library supports: a
+    /// process of a newer version migrated it. Update every process.
+    #[error("task store schema is newer than this library: found={found}, supported={supported}")]
+    SchemaTooNew {
+        /// The schema version in the database.
+        found: i32,
+        /// The newest version this library knows.
+        supported: i32,
+    },
 }
 
 /// Leases: any process may take a task whose owner stopped renewing it
@@ -99,6 +78,8 @@ pub struct PgStoreBuilder {
     lease: Option<Lease>,
     retention: Duration,
     alive_interval: Duration,
+    cleanup_interval: Duration,
+    cleanup_batch: u32,
 }
 
 impl PgStoreBuilder {
@@ -123,8 +104,21 @@ impl PgStoreBuilder {
         self
     }
 
+    /// How often finished tasks past retention are removed. Default 60 s.
+    pub fn cleanup_interval(mut self, interval: Duration) -> Self {
+        self.cleanup_interval = interval;
+        self
+    }
+
+    /// How many finished tasks one cleanup statement removes; batches repeat
+    /// while full, each in a short transaction. Default 1000.
+    pub fn cleanup_batch(mut self, batch: u32) -> Self {
+        self.cleanup_batch = batch;
+        self
+    }
+
     fn validate(&self) -> Result<(), PgStoreError> {
-        let positive = [self.retention, self.alive_interval]
+        let positive = [self.retention, self.alive_interval, self.cleanup_interval]
             .into_iter()
             .chain(self.lease.iter().flat_map(|l| [l.duration, l.heartbeat]));
         for duration in positive {
@@ -134,6 +128,9 @@ impl PgStoreBuilder {
                 }
                 .into());
             }
+        }
+        if self.cleanup_batch == 0 {
+            return Err(PgStoreError::InvalidCleanupBatch);
         }
         if self.process_id.is_empty() {
             return Err(PgStoreError::EmptyProcessId);
@@ -164,7 +161,9 @@ impl PgStoreBuilder {
     /// Uses the application's pool, for example the one of a sea-orm
     /// connection (`DatabaseConnection::get_postgres_connection_pool`).
     ///
-    /// Creates the tables if needed, checks that no live process uses this
+    /// Creates or migrates the schema (one process at a time; the first
+    /// start on an older base builds indexes, which holds writes to the
+    /// tasks table meanwhile), checks that no live process uses this
     /// process id, gives back to the queues the tasks a previous run of this
     /// process left unfinished (rule 2.3.19 p. 1), and starts marking the
     /// process alive, renewing leases and removing expired finished tasks.
@@ -172,11 +171,13 @@ impl PgStoreBuilder {
     /// # Errors
     ///
     /// [`PgStoreError::Config`] for invalid settings,
-    /// [`PgStoreError::ProcessIdTaken`] when a live process uses the id, and
+    /// [`PgStoreError::SchemaTooNew`] when a newer version migrated the
+    /// database, [`PgStoreError::ProcessIdTaken`] when a live process uses
+    /// the id, and
     /// [`PgStoreError::Database`] when the database fails.
     pub async fn with_pool(self, pool: PgPool) -> Result<PgStore, PgStoreError> {
         self.validate()?;
-        create_schema(&pool).await?;
+        migrate(&pool).await?;
         claim_process_id(&pool, &self.process_id, self.alive_interval).await?;
         give_back(&pool, &self.process_id).await?;
         let shared = Arc::new(Shared {
@@ -184,6 +185,8 @@ impl PgStoreBuilder {
             process_id: self.process_id,
             lease: self.lease,
             retention: self.retention,
+            cleanup_interval: self.cleanup_interval,
+            cleanup_batch: self.cleanup_batch,
             queues: Mutex::default(),
             upkeep: Mutex::default(),
         });
@@ -200,7 +203,7 @@ impl PgStoreBuilder {
 /// keep their tasks outside the process.
 ///
 /// One store per process; [`queue`](Self::queue) gives the source of one
-/// queue. Pair it with [`JsonCodec`](taskcraft::codec::JsonCodec).
+/// queue; build the queue on it with [`Queue::on_store`](taskcraft::Queue::on_store).
 #[derive(Clone)]
 pub struct PgStore {
     shared: Arc<Shared>,
@@ -215,6 +218,8 @@ impl PgStore {
             lease: None,
             retention: Duration::from_secs(7 * 24 * 3600),
             alive_interval: Duration::from_secs(10),
+            cleanup_interval: Duration::from_secs(60),
+            cleanup_batch: 1000,
         }
     }
 
@@ -268,6 +273,8 @@ pub(crate) struct Shared {
     pub(crate) process_id: String,
     pub(crate) lease: Option<Lease>,
     retention: Duration,
+    cleanup_interval: Duration,
+    cleanup_batch: u32,
     queues: Mutex<HashMap<Arc<str>, Arc<Held>>>,
     upkeep: Mutex<Option<JoinHandle<()>>>,
 }
@@ -285,14 +292,54 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-async fn create_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
+/// The schema version this library creates and reads.
+fn supported_version() -> i32 {
+    i32::try_from(MIGRATIONS.len()).unwrap_or(i32::MAX)
+}
+
+/// Brings the schema to the supported version in one transaction under the
+/// schema lock: a process starting meanwhile waits and finds it done. A base
+/// of 0.1 or 0.2 has no version table and counts as version 0, its tables as
+/// version 1.
+async fn migrate(pool: &PgPool) -> Result<(), PgStoreError> {
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(SCHEMA_LOCK)
         .execute(&mut *tx)
         .await?;
-    sqlx::raw_sql(SCHEMA).execute(&mut *tx).await?;
-    tx.commit().await
+    sqlx::raw_sql("CREATE TABLE IF NOT EXISTS taskcraft_schema (version integer NOT NULL)")
+        .execute(&mut *tx)
+        .await?;
+    let found: Option<i32> = sqlx::query_scalar("SELECT max(version) FROM taskcraft_schema")
+        .fetch_one(&mut *tx)
+        .await?;
+    let found = found.unwrap_or(0);
+    let supported = supported_version();
+    if found > supported {
+        return Err(PgStoreError::SchemaTooNew { found, supported });
+    }
+    let done = usize::try_from(found).unwrap_or(0);
+    for migration in MIGRATIONS.iter().skip(done) {
+        sqlx::raw_sql(*migration).execute(&mut *tx).await?;
+    }
+    if found < supported {
+        sqlx::query("DELETE FROM taskcraft_schema")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO taskcraft_schema (version) VALUES ($1)")
+            .bind(supported)
+            .execute(&mut *tx)
+            .await?;
+        info!(
+            event = "store",
+            action = "migrated",
+            "task store schema migrated: from={}, to={}",
+            found,
+            supported
+        );
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Refuses an id marked alive within two intervals, then marks it (rule
@@ -354,17 +401,25 @@ async fn give_back(pool: &PgPool, process_id: &str) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-/// Marks the process alive, renews leases, reports cancel requests and lost
-/// leases, and removes finished tasks past retention — every `tick`.
+/// Marks the process alive, renews leases and reports cancel requests and
+/// lost leases every `tick`; removes finished tasks past retention every
+/// cleanup interval.
 async fn upkeep(shared: Weak<Shared>, tick: Duration) {
     let mut interval = tokio::time::interval(tick);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut cleaned: Option<tokio::time::Instant> = None;
     loop {
         interval.tick().await;
         let Some(shared) = shared.upgrade() else {
             return;
         };
-        if let Err(error) = upkeep_once(&shared).await {
+        let due = cleaned.is_none_or(|at| at.elapsed() >= shared.cleanup_interval);
+        let mut result = upkeep_once(&shared).await;
+        if result.is_ok() && due {
+            cleaned = Some(tokio::time::Instant::now());
+            result = cleanup(&shared).await;
+        }
+        if let Err(error) = result {
             warn!(
                 event = "source",
                 action = "store_error",
@@ -422,12 +477,23 @@ async fn upkeep_once(shared: &Shared) -> Result<(), sqlx::Error> {
         };
         report(&held, &ids, &rows, shared.lease.is_some());
     }
-    sqlx::query("DELETE FROM taskcraft_tasks
-          WHERE state IN ('succeeded', 'failed', 'panicked', 'cancelled') AND updated_at < now() - make_interval(secs => $1)")
-    .bind(shared.retention.as_secs_f64())
-    .execute(&shared.pool)
-    .await?;
     Ok(())
+}
+
+/// Removes finished tasks past retention in batches, oldest first, while
+/// batches come back full.
+async fn cleanup(shared: &Shared) -> Result<(), sqlx::Error> {
+    loop {
+        let removed = sqlx::query(CLEANUP_BATCH)
+            .bind(shared.retention.as_secs_f64())
+            .bind(i64::from(shared.cleanup_batch))
+            .execute(&shared.pool)
+            .await?
+            .rows_affected();
+        if removed < u64::from(shared.cleanup_batch) {
+            return Ok(());
+        }
+    }
 }
 
 /// Turns one renewal into notices: tasks no longer ours lost their lease,
@@ -478,6 +544,18 @@ mod tests {
                 .contains("heartbeat interval must be less than half the lease")
         );
         assert!(builder().retention(Duration::ZERO).validate().is_err());
+        assert!(
+            builder()
+                .cleanup_interval(Duration::ZERO)
+                .validate()
+                .is_err()
+        );
+        let batch = builder().cleanup_batch(0).validate().unwrap_err();
+        assert!(
+            batch
+                .to_string()
+                .contains("cleanup batch must be at least 1")
+        );
         assert!(matches!(
             PgStore::builder("").validate(),
             Err(PgStoreError::EmptyProcessId)

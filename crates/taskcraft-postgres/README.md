@@ -69,9 +69,17 @@ async fn store(pool: sqlx::PgPool) -> Result<PgStore, PgStoreError> {
 - **Tables.** `taskcraft_tasks` and `taskcraft_processes`, created on start.
   Tasks are stored as the JSON envelope of `JsonCodec`, the built-in codec
   of `Queue::on_store`; it names metadata through the queue's registry.
-- **Claim on poll.** One statement with `FOR UPDATE SKIP LOCKED` takes the
-  next due task for this process: no task reaches two processes. Every later
-  write checks that this process still owns the task.
+- **Schema versions.** `taskcraft_schema` keeps the schema version. On start
+  the store applies the missing migrations, one process at a time; a base
+  created by 0.1 or 0.2 is migrated in place, tasks and history kept. The
+  first start on an older base builds indexes, holding writes to the tasks
+  table meanwhile. A base migrated by a newer version is refused
+  (`PgStoreError::SchemaTooNew`): update every process.
+- **Claim on poll.** A statement with `FOR UPDATE SKIP LOCKED` takes the
+  next task for this process — first one whose owner's lease expired, then
+  the earliest due one — each through its own index: no task reaches two
+  processes, and a poll never scans the table. Every later write checks
+  that this process still owns the task.
 - **Final states are recorded** on completion — the ack point is not
   configurable — and kept for the retention period: a push with the id of a
   finished task answers "already finished" meanwhile.
@@ -85,7 +93,9 @@ async fn store(pool: sqlx::PgPool) -> Result<PgStore, PgStoreError> {
   a request; the owner cancels it at its next renewal.
 
 Settings: `lease` (default off; 60 s / 15 s when on), `retention` (7 days),
-`alive_interval` (10 s). Features `tls-rustls` and `tls-native-tls` enable
+`alive_interval` (10 s), `cleanup_interval` (60 s) and `cleanup_batch`
+(1000): finished tasks past retention are removed by index, a batch at a
+time. Features `tls-rustls` and `tls-native-tls` enable
 TLS for the connections the store opens itself.
 
 ## Testing

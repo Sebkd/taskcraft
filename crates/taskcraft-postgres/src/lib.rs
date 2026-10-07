@@ -49,6 +49,7 @@
 //! example.
 
 mod source;
+mod sql;
 mod store;
 
 pub use source::{PgReceipt, PgSource};

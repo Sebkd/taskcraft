@@ -11,6 +11,7 @@ use taskcraft::source::{
 use taskcraft::{FinishReason, TaskId, TaskState, TaskStatus};
 use tokio::time::Instant;
 
+use crate::sql::{CLAIM_DUE, CLAIM_EXPIRED};
 use crate::store::{Held, PgStoreError, Shared, lock};
 
 /// Identifies a task this process took from the store.
@@ -114,6 +115,23 @@ impl PgSource {
         }
     }
 
+    /// Runs one claim statement: the task id, its envelope with the
+    /// attempt counters, and its previous owner.
+    async fn claim(
+        &self,
+        statement: &'static str,
+    ) -> Result<Option<(String, String, Option<String>)>, PgStoreError> {
+        let lease = self.shared.lease;
+        let row = sqlx::query_as(statement)
+            .bind(&*self.queue)
+            .bind(&self.shared.process_id)
+            .bind(lease.is_some())
+            .bind(lease.map_or(0.0, |l| l.duration.as_secs_f64()))
+            .fetch_optional(&self.shared.pool)
+            .await?;
+        Ok(row)
+    }
+
     fn release(&self, id: &TaskId) {
         lock(&self.held.tasks).remove(id);
     }
@@ -159,30 +177,15 @@ impl TaskStore for PgSource {
 
     async fn poll(&self) -> Result<Polled<StoreMessage, PgReceipt>, PgStoreError> {
         let lease = self.shared.lease;
-        let row: Option<(String, String, Option<String>)> = sqlx::query_as("WITH next AS (
-                 SELECT queue, id, owner AS previous
-                   FROM taskcraft_tasks
-                  WHERE queue = $1
-                    AND ((state IN ('queued', 'deferred')
-                          AND (next_delivery IS NULL OR next_delivery <= now()))
-                      OR ($2 AND state IN ('accepted', 'running', 'retry_waiting') AND lease_until < now()))
-                  ORDER BY COALESCE(next_delivery, created_at), created_at
-                  LIMIT 1
-                    FOR UPDATE SKIP LOCKED)
-             UPDATE taskcraft_tasks t
-                SET state = 'accepted', owner = $3, next_delivery = NULL, updated_at = now(),
-                    lease_until = CASE WHEN $2 THEN now() + make_interval(secs => $4) END
-               FROM next
-              WHERE t.queue = next.queue AND t.id = next.id
-          RETURNING t.id,
-                    (t.task || jsonb_build_object('attempt', t.attempt, 'retries', t.retries))::text,
-                    next.previous")
-        .bind(&*self.queue)
-        .bind(lease.is_some())
-        .bind(&self.shared.process_id)
-        .bind(lease.map_or(0.0, |l| l.duration.as_secs_f64()))
-        .fetch_optional(&self.shared.pool)
-        .await?;
+        // Tasks of a stopped owner first: under a steady flow of due tasks
+        // they would otherwise wait for the queue to empty.
+        let mut row = None;
+        if lease.is_some() {
+            row = self.claim(CLAIM_EXPIRED).await?;
+        }
+        if row.is_none() {
+            row = self.claim(CLAIM_DUE).await?;
+        }
         let Some((id, task, previous)) = row else {
             return Ok(Polled::Empty);
         };

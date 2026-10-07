@@ -365,6 +365,7 @@ async fn finished_tasks_expire() {
     let store = PgStore::builder(unique("p"))
         .alive_interval(ALIVE)
         .retention(SEC)
+        .cleanup_interval(ALIVE)
         .connect(&url)
         .await
         .unwrap();
