@@ -303,9 +303,11 @@ jobs:
       # lines on 0.2.1); changes that add tests raise it.
       - name: Report
         run: |
-          cargo llvm-cov report --summary-only
-          cargo llvm-cov report --html --output-dir coverage
-          cargo llvm-cov report --lcov --output-path coverage/lcov.info --fail-under-lines 87
+          .github/annotate.sh summary.log cargo llvm-cov report --summary-only
+          .github/annotate.sh html.log cargo llvm-cov report --html --output-dir coverage
+          .github/annotate.sh lcov.log cargo llvm-cov report --lcov --output-path coverage/lcov.info --fail-under-lines 87
+          # The total, as an annotation: visible without the run's logs.
+          echo "::notice::$(grep '^TOTAL' summary.log)"
 
       - name: Upload the report
         if: always()
