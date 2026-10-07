@@ -186,6 +186,29 @@ async fn ask(reports: &QueueHandle<String>) -> Result<(), Box<dyn std::error::Er
 Two pushes racing with one id create one task. Full example:
 [`idempotent-push`](https://github.com/Sebkd/taskcraft/blob/master/crates/taskcraft/examples/idempotent-push.rs).
 
+### Delayed push
+
+```rust
+use std::time::{Duration, SystemTime};
+use taskcraft::{QueueHandle, Task};
+
+async fn remind(reminders: &QueueHandle<String>) -> Result<(), Box<dyn std::error::Error>> {
+    // Not before an hour from now…
+    let _ = reminders.push(Task::new("call back".to_owned()).with_delay(Duration::from_secs(3600))).await?;
+    // …or not before a moment on the clock.
+    let nine = SystemTime::now() + Duration::from_secs(8 * 3600);
+    let _ = reminders.push(Task::new("standup".to_owned()).with_deliver_at(nine)).await?;
+    Ok(())
+}
+```
+
+The source holds the task back and hands it out on the first poll after the
+moment, so it starts no earlier — and at most a poll pause later. The
+in-memory source and the PostgreSQL task store support it; another source
+answers `PushTaskError::DelayUnsupported`. In the store a delayed task is
+"queued" with its next delivery in its status, and any process may take it.
+Full example: [`durable-store`](https://github.com/Sebkd/taskcraft/blob/master/crates/taskcraft-postgres/examples/durable-store.rs).
+
 ### Graceful shutdown and its report
 
 ```rust

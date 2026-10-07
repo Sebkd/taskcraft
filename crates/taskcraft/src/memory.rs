@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::fmt;
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::SystemTime;
 
 use tokio::time::Instant;
 
@@ -161,28 +162,62 @@ impl<Args: Send + 'static> Source for InMemorySource<Args> {
     }
 }
 
+impl<Args> InMemorySource<Args> {
+    /// Stores a pushed task, ready or due at `due`, checking its id and the
+    /// capacity.
+    fn store(
+        &self,
+        id: &TaskId,
+        message: Task<Args>,
+        due: Option<Instant>,
+    ) -> Result<PushResult, PushError<Infallible>> {
+        let mut state = self.lock();
+        if state.closed {
+            return Err(PushError::Closed);
+        }
+        if state.held.contains(id) {
+            return Ok(PushResult::Duplicate);
+        }
+        if state.held.len() >= self.capacity {
+            return Ok(PushResult::Full);
+        }
+        state.held.insert(id.clone());
+        match due {
+            None => state.ready.push_back(message),
+            Some(due) => {
+                let n = state.next;
+                state.next = n.wrapping_add(1);
+                state.deferred.insert((due, n), message);
+            }
+        }
+        Ok(PushResult::Stored)
+    }
+}
+
 impl<Args: Send + 'static> PushSource for InMemorySource<Args> {
     async fn push(
         &self,
         id: &TaskId,
         message: Task<Args>,
     ) -> Result<PushResult, PushError<Infallible>> {
-        {
-            let mut state = self.lock();
-            if state.closed {
-                return Err(PushError::Closed);
-            }
-            if state.held.contains(id) {
-                return Ok(PushResult::Duplicate);
-            }
-            if state.held.len() >= self.capacity {
-                return Ok(PushResult::Full);
-            }
-            state.held.insert(id.clone());
-            state.ready.push_back(message);
+        let stored = self.store(id, message, None)?;
+        if stored == PushResult::Stored {
+            self.wake.wake();
         }
-        self.wake.wake();
-        Ok(PushResult::Stored)
+        Ok(stored)
+    }
+
+    /// Held back with the tasks deferred by a handler; nothing to wake for
+    /// until the moment comes.
+    async fn push_at(
+        &self,
+        id: &TaskId,
+        message: Task<Args>,
+        at: SystemTime,
+    ) -> Result<PushResult, PushError<Infallible>> {
+        // The wall-clock moment on the runtime's clock, paused time included.
+        let delay = at.duration_since(SystemTime::now()).unwrap_or_default();
+        self.store(id, message, Some(Instant::now() + delay))
     }
 
     async fn remove(&self, id: &TaskId) -> Result<Withdrawal, Infallible> {

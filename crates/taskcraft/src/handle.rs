@@ -3,6 +3,7 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use tracing::{info, warn};
 
@@ -28,6 +29,10 @@ pub enum PushTaskError {
     /// The queue got the shutdown signal (rule 2.3.14 p. 3).
     #[error("queue is stopping")]
     Stopping,
+    /// The task has a moment of delivery and the source cannot hold it back
+    /// until then ([`Task::with_deliver_at`]).
+    #[error("source does not support delayed push")]
+    DelayUnsupported,
     /// The task sets its own ack point and the source does not allow it.
     #[error(transparent)]
     AckOverride(#[from] AckOverrideUnsupported),
@@ -66,11 +71,12 @@ pub(crate) trait Port<Args>: Send + Sync {
 
     fn remove<'a>(&'a self, id: &'a TaskId) -> BoxFuture<'a, Result<Withdrawal, BoxError>>;
 
-    /// Encodes the task and stores it.
+    /// Encodes the task and stores it, held back until `at` if given.
     fn push<'a>(
         &'a self,
         id: &'a TaskId,
         task: Task<Args>,
+        at: Option<SystemTime>,
     ) -> BoxFuture<'a, Result<PushResult, PushTaskError>>;
 }
 
@@ -102,11 +108,17 @@ where
         &'a self,
         id: &'a TaskId,
         task: Task<Args>,
+        at: Option<SystemTime>,
     ) -> BoxFuture<'a, Result<PushResult, PushTaskError>> {
         let message = self.codec.encode(task);
         Box::pin(async move {
-            match self.backend.push(id, message?).await {
+            let pushed = match at {
+                Some(at) => self.backend.push_at(id, message?, at).await,
+                None => self.backend.push(id, message?).await,
+            };
+            match pushed {
                 Ok(result) => Ok(result),
+                Err(PushError::DelayUnsupported) => Err(PushTaskError::DelayUnsupported),
                 Err(PushError::Closed) => Err(PushTaskError::Stopping),
                 Err(PushError::Source(e)) => Err(PushTaskError::Source(Box::new(e))),
             }
@@ -189,11 +201,16 @@ impl<Args> HandleCore<Args> {
         }
         let caps = self.port.capabilities();
         caps.check_ack_override(task.ack_point())?;
+        // A moment that has passed is an ordinary push.
+        let at = task.deliver_at().filter(|at| *at > SystemTime::now());
+        if at.is_some() && !caps.supports_defer() {
+            return Err(PushTaskError::DelayUnsupported);
+        }
         let id = task.id().clone();
         if let Some(state) = self.tasks.state(&id) {
             return Ok(PushOutcome::AlreadyRunning { id, state });
         }
-        match self.port.push(&id, task).await? {
+        match self.port.push(&id, task, at).await? {
             PushResult::Stored => {
                 // The worker may have stopped intake during the write: a
                 // source that does not outlive the process would keep the

@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use taskcraft::source::{
     Completion, DeferError, Notice, Notices, Polled, Progress, PushError, PushResult, StoreMessage,
@@ -64,6 +64,54 @@ impl PgSource {
     #[must_use]
     pub fn queue(&self) -> &str {
         &self.queue
+    }
+
+    /// Inserts a pushed task, due at once or at `next` (seconds since the
+    /// epoch), checking its id against live and finished tasks.
+    async fn insert(
+        &self,
+        id: &TaskId,
+        message: StoreMessage,
+        next: Option<f64>,
+    ) -> Result<PushResult, PushError<PgStoreError>> {
+        let task = String::from_utf8(message.into_bytes())
+            .map_err(|e| PushError::Source(PgStoreError::Data(e.to_string())))?;
+        let inserted = sqlx::query(
+            "INSERT INTO taskcraft_tasks (queue, id, task, state, next_delivery)
+             VALUES ($1, $2, $3::jsonb, 'queued', to_timestamp($4))
+             ON CONFLICT (queue, id) DO NOTHING",
+        )
+        .bind(&*self.queue)
+        .bind(id.as_str())
+        .bind(&task)
+        .bind(next)
+        .execute(&self.shared.pool)
+        .await
+        .map_err(|e| PushError::Source(e.into()))?
+        .rows_affected();
+        if inserted == 1 {
+            // A held-back task gives this process nothing to do yet.
+            if next.is_none() {
+                self.wake.wake();
+            }
+            return Ok(PushResult::Stored);
+        }
+        let state: Option<String> =
+            sqlx::query_scalar("SELECT state FROM taskcraft_tasks WHERE queue = $1 AND id = $2")
+                .bind(&*self.queue)
+                .bind(id.as_str())
+                .fetch_optional(&self.shared.pool)
+                .await
+                .map_err(|e| PushError::Source(e.into()))?;
+        match state
+            .as_deref()
+            .map(parse_state)
+            .transpose()
+            .map_err(PushError::Source)?
+        {
+            Some(state) if state.is_terminal() => Ok(PushResult::Finished(state)),
+            _ => Ok(PushResult::Duplicate),
+        }
     }
 
     fn release(&self, id: &TaskId) {
@@ -210,40 +258,21 @@ impl TaskStore for PgSource {
         id: &TaskId,
         message: StoreMessage,
     ) -> Result<PushResult, PushError<PgStoreError>> {
-        let task = String::from_utf8(message.into_bytes())
+        self.insert(id, message, None).await
+    }
+
+    /// Stored as queued with its next delivery: any process takes it once
+    /// the moment has come by the database's clock.
+    async fn push_at(
+        &self,
+        id: &TaskId,
+        message: StoreMessage,
+        at: SystemTime,
+    ) -> Result<PushResult, PushError<PgStoreError>> {
+        let epoch = at
+            .duration_since(UNIX_EPOCH)
             .map_err(|e| PushError::Source(PgStoreError::Data(e.to_string())))?;
-        let inserted = sqlx::query(
-            "INSERT INTO taskcraft_tasks (queue, id, task, state)
-             VALUES ($1, $2, $3::jsonb, 'queued')
-             ON CONFLICT (queue, id) DO NOTHING",
-        )
-        .bind(&*self.queue)
-        .bind(id.as_str())
-        .bind(&task)
-        .execute(&self.shared.pool)
-        .await
-        .map_err(|e| PushError::Source(e.into()))?
-        .rows_affected();
-        if inserted == 1 {
-            self.wake.wake();
-            return Ok(PushResult::Stored);
-        }
-        let state: Option<String> =
-            sqlx::query_scalar("SELECT state FROM taskcraft_tasks WHERE queue = $1 AND id = $2")
-                .bind(&*self.queue)
-                .bind(id.as_str())
-                .fetch_optional(&self.shared.pool)
-                .await
-                .map_err(|e| PushError::Source(e.into()))?;
-        match state
-            .as_deref()
-            .map(parse_state)
-            .transpose()
-            .map_err(PushError::Source)?
-        {
-            Some(state) if state.is_terminal() => Ok(PushResult::Finished(state)),
-            _ => Ok(PushResult::Duplicate),
-        }
+        self.insert(id, message, Some(epoch.as_secs_f64())).await
     }
 
     async fn defer(
