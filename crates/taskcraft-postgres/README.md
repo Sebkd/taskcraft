@@ -89,11 +89,19 @@ async fn store(pool: sqlx::PgPool) -> Result<PgStore, PgStoreError> {
 - **Leases.** The owner renews its tasks every heartbeat. A task whose lease
   expired is taken over by any process, attempt count kept; the old owner
   cancels it and writes nothing more.
+- **Wake-ups across processes.** A push, a requeue or tasks given back
+  notify every process (`LISTEN`/`NOTIFY` on channel `taskcraft_tasks`, one
+  more connection per process): their workers poll at once, and the poll
+  strategy stays a safety net — the default one is fine. Delayed and
+  deferred tasks and expired leases are found by polls. A lost `LISTEN`
+  connection is logged (`source/notify_lost`) and restored. Behind a
+  connection pooler in transaction mode, where `LISTEN` does not work, turn
+  it off with `notifications(false)`.
 - **Cancel across processes.** Cancelling a task another process runs records
   a request; the owner cancels it at its next renewal.
 
 Settings: `lease` (default off; 60 s / 15 s when on), `retention` (7 days),
-`stale_owner_warning` (1 h, see below),
+`stale_owner_warning` (1 h, see below), `notifications` (on),
 `alive_interval` (10 s), `cleanup_interval` (60 s) and `cleanup_batch`
 (1000): finished tasks past retention are removed by index, a batch at a
 time. Features `tls-rustls` and `tls-native-tls` enable

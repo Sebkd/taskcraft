@@ -6,13 +6,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use taskcraft::source::{
     Completion, DeferError, Notice, Notices, Polled, Progress, PushError, PushResult, Requeue,
-    StoreMessage, TaskStore, WakeHandle, WakeSignal, Withdrawal,
+    StoreMessage, TaskStore, WakeSignal, Withdrawal,
 };
 use taskcraft::{FinishReason, TaskId, TaskState, TaskStatus};
 use tokio::time::Instant;
 
 use crate::sql::{CLAIM_DUE, CLAIM_EXPIRED};
-use crate::store::{Held, PgStoreError, Shared, lock};
+use crate::store::{Held, PgStoreError, Shared, announce, lock};
 
 /// Identifies a task this process took from the store.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -42,7 +42,6 @@ pub struct PgSource {
     queue: Arc<str>,
     held: Arc<Held>,
     notices: Mutex<Option<Notices>>,
-    wake: WakeHandle,
 }
 
 impl PgSource {
@@ -57,7 +56,6 @@ impl PgSource {
             queue,
             held,
             notices: Mutex::new(Some(notices)),
-            wake: WakeHandle::new(),
         }
     }
 
@@ -93,7 +91,8 @@ impl PgSource {
         if inserted == 1 {
             // A held-back task gives this process nothing to do yet.
             if next.is_none() {
-                self.wake.wake();
+                self.held.wake.wake();
+                announce(&self.shared, &self.queue).await;
             }
             return Ok(PushResult::Stored);
         }
@@ -249,7 +248,7 @@ impl TaskStore for PgSource {
     }
 
     fn subscribe(&self) -> Option<WakeSignal> {
-        Some(self.wake.subscribe())
+        Some(self.held.wake.subscribe())
     }
 
     fn notices(&self) -> Option<Notices> {
@@ -366,7 +365,8 @@ impl TaskStore for PgSource {
         .await?
         .rows_affected();
         if requeued == 1 {
-            self.wake.wake();
+            self.held.wake.wake();
+            announce(&self.shared, &self.queue).await;
             return Ok(Requeue::Requeued);
         }
         let state: Option<String> =

@@ -11,8 +11,9 @@ use std::time::{Duration, SystemTime};
 use taskcraft::error::RequeueError;
 use taskcraft::source::{Notice, Polled, StoreMessage, TaskStore};
 use taskcraft::{
-    Attempt, Cancel, CancelOutcome, CancellationToken, FinishReason, Monitor, Outcome, PushOutcome,
-    Queue, QueueHandle, ShutdownReport, Task, TaskId, TaskState, task_fn,
+    Attempt, Cancel, CancelOutcome, CancellationToken, FinishReason, Monitor, Outcome,
+    PollStrategy, PushOutcome, Queue, QueueHandle, ShutdownReport, Task, TaskId, TaskState,
+    task_fn,
 };
 use taskcraft_postgres::{Lease, PgSource, PgStore, PgStoreError};
 use tokio::task::JoinHandle;
@@ -704,4 +705,128 @@ async fn silent_owner_is_reported_on_start() {
             .unwrap();
     }
     assert!(leased.find("stale_owner", &silent).is_empty());
+}
+
+/// A process that takes tasks of `name` and polls once a minute unless
+/// woken: it sees the work of another process only through a notification.
+async fn sleepy(
+    pool: sqlx::PgPool,
+    name: &str,
+    notifications: bool,
+) -> (
+    PgStore,
+    Arc<Mutex<Vec<u32>>>,
+    JoinHandle<ShutdownReport>,
+    CancellationToken,
+) {
+    let store = PgStore::builder(unique("b"))
+        .alive_interval(ALIVE)
+        .notifications(notifications)
+        .with_pool(pool)
+        .await
+        .unwrap();
+    let ran: Arc<Mutex<Vec<u32>>> = Arc::default();
+    let record = Arc::clone(&ran);
+    let queue = Queue::on_store(
+        name,
+        Arc::new(store.queue(name)),
+        task_fn(move |n: u32| {
+            record.lock().unwrap().push(n);
+            async {}
+        }),
+    )
+    .poll_strategy(PollStrategy::FirstOf(vec![
+        PollStrategy::Wake,
+        PollStrategy::Interval(60 * SEC),
+    ]))
+    .build()
+    .unwrap();
+    let (monitor, _handle) = Monitor::new().register(queue).unwrap();
+    let (running, stop) = run(monitor);
+    // The first poll finds nothing; the worker goes to sleep.
+    sleep(SEC).await;
+    (store, ran, running, stop)
+}
+
+/// A process that only pushes into `name`.
+async fn pusher(url: &str, name: &str) -> (PgStore, Handle) {
+    let store = store(url, &unique("a"), false).await;
+    let (_monitor, handle) = queue(name, store.queue(name), &Arc::default());
+    (store, handle)
+}
+
+/// Change store-notify-wakeup, criterion 1: a push from another process
+/// wakes the worker at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn push_from_another_process_wakes_the_worker() {
+    let Some(url) = url() else { return };
+    let name = unique("q");
+    let (_b, ran, running, stop) =
+        sleepy(sqlx::PgPool::connect(&url).await.unwrap(), &name, true).await;
+    let (_a, handle) = pusher(&url, &name).await;
+    let _ = handle.push(Task::new(7)).await.unwrap();
+    assert!(until(5 * SEC, async || *ran.lock().unwrap() == [7]).await);
+    stop.cancel();
+    running.await.unwrap();
+}
+
+/// Criterion 2: without notifications the worker waits for its next poll.
+#[tokio::test(flavor = "multi_thread")]
+async fn without_notifications_the_worker_polls() {
+    let Some(url) = url() else { return };
+    let name = unique("q");
+    let (_b, ran, running, stop) =
+        sleepy(sqlx::PgPool::connect(&url).await.unwrap(), &name, false).await;
+    let (_a, handle) = pusher(&url, &name).await;
+    let _ = handle.push(Task::new(7)).await.unwrap();
+    sleep(3 * SEC).await;
+    assert!(ran.lock().unwrap().is_empty());
+    stop.cancel();
+    running.await.unwrap();
+}
+
+/// Criterion 3: a lost `LISTEN` connection is logged and restored; until
+/// then polling covers.
+#[tokio::test]
+async fn lost_listen_connection_is_restored() {
+    let Some(url) = url() else { return };
+    let logs = Logs::default();
+    let _guard = logs.install();
+    let name = unique("q");
+    let app = unique("listener");
+    let options: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_with(options.application_name(&app))
+        .await
+        .unwrap();
+    let (b, ran, running, stop) = sleepy(pool, &name, true).await;
+
+    let admin = sqlx::PgPool::connect(&url).await.unwrap();
+    let ended: Vec<bool> = sqlx::query_scalar(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+          WHERE application_name = $1 AND query ILIKE 'LISTEN%'",
+    )
+    .bind(&app)
+    .fetch_all(&admin)
+    .await
+    .unwrap();
+    assert_eq!(ended, [true], "one LISTEN connection");
+    assert!(
+        until(10 * SEC, async || logs
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.contains("action=notify_lost ")
+                && r.contains(&format!("process_id={},", b.process_id()))))
+        .await
+    );
+
+    // Reconnected: a push from another process wakes the worker again.
+    sleep(3 * SEC).await;
+    let (_a, handle) = pusher(&url, &name).await;
+    let _ = handle.push(Task::new(8)).await.unwrap();
+    assert!(until(5 * SEC, async || *ran.lock().unwrap() == [8]).await);
+    stop.cancel();
+    running.await.unwrap();
 }

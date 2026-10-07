@@ -66,7 +66,9 @@ async fn start(
         task_fn(invoice),
     )
     .concurrency(4)
-    // Other processes' work (and expired leases) shows up only on polls.
+    // Pushes wake the workers of every process (LISTEN/NOTIFY); deferred and
+    // delayed tasks come due without a wake-up, so a short interval keeps this
+    // demo quick. The default strategy works too, a little slower.
     .poll_strategy(PollStrategy::Interval(Duration::from_millis(200)))
     .build()?;
     let stop = CancellationToken::new();
