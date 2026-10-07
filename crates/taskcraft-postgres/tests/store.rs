@@ -532,3 +532,176 @@ async fn failed_task_is_requeued() {
     stop.cancel();
     running.await.unwrap();
 }
+
+/// The records of a thread while installed, as `field=value` lines.
+#[derive(Clone, Default)]
+struct Logs(Arc<Mutex<Vec<String>>>);
+
+thread_local! {
+    static CURRENT: std::cell::RefCell<Option<Logs>> = const { std::cell::RefCell::new(None) };
+}
+
+/// One global subscriber sends each record to the capture of its thread: a
+/// per-thread default would race with tests running in parallel without one
+/// (a callsite first hit there caches "no interest").
+struct Router;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Router {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        struct Fields(String);
+        impl tracing::field::Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.push_str(&format!("{}={:?} ", field.name(), value));
+            }
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.0.push_str(&format!("{}={} ", field.name(), value));
+            }
+        }
+        CURRENT.with(|current| {
+            if let Some(logs) = &*current.borrow() {
+                let mut fields = Fields(String::new());
+                event.record(&mut fields);
+                logs.0.lock().unwrap().push(fields.0);
+            }
+        });
+    }
+}
+
+/// Clears the capture of the thread on drop.
+struct Installed;
+
+impl Drop for Installed {
+    fn drop(&mut self) {
+        CURRENT.with(|current| *current.borrow_mut() = None);
+    }
+}
+
+impl Logs {
+    fn install(&self) -> Installed {
+        static GLOBAL: std::sync::Once = std::sync::Once::new();
+        GLOBAL.call_once(|| {
+            use tracing_subscriber::layer::SubscriberExt;
+            tracing::subscriber::set_global_default(tracing_subscriber::registry().with(Router))
+                .unwrap();
+            tracing::callsite::rebuild_interest_cache();
+        });
+        CURRENT.with(|current| *current.borrow_mut() = Some(self.clone()));
+        Installed
+    }
+
+    fn find(&self, action: &str, owner: &str) -> Vec<String> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| {
+                r.contains(&format!("action={action} ")) && r.contains(&format!("owner={owner},"))
+            })
+            .cloned()
+            .collect()
+    }
+}
+
+async fn states(url: &str, queue: &str) -> Vec<(String, i32)> {
+    let pool = sqlx::PgPool::connect(url).await.unwrap();
+    sqlx::query_as("SELECT state, attempt FROM taskcraft_tasks WHERE queue = $1 ORDER BY id")
+        .bind(queue)
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+}
+
+/// Change store-orphan-release, criterion 1: the tasks of a retired process
+/// go back to their queues, attempt counts kept.
+#[tokio::test]
+async fn retired_process_tasks_are_released() {
+    let Some(url) = url() else { return };
+    let (retired, name) = (unique("retired"), unique("q"));
+    claim_and_crash(&url, &retired, &name, false).await;
+    sleep(3 * ALIVE).await;
+    let other = store(&url, &unique("admin"), false).await;
+
+    let logs = Logs::default();
+    let released = {
+        let _guard = logs.install();
+        other.release_process(&retired).await.unwrap()
+    };
+    assert_eq!(released, 2);
+    assert_eq!(
+        states(&url, &name).await,
+        [("queued".to_owned(), 1), ("queued".to_owned(), 1)]
+    );
+    let records = logs.find("released", &retired);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert!(records[0].contains("count=2"));
+    assert_eq!(other.release_process(&retired).await.unwrap(), 0);
+}
+
+/// Criterion 2: a live process keeps its tasks.
+#[tokio::test]
+async fn live_process_tasks_are_not_released() {
+    let Some(url) = url() else { return };
+    let (live, name) = (unique("live"), unique("q"));
+    let owner = store(&url, &live, false).await;
+    let source = owner.queue(&name);
+    let message = br#"{"id":"t","args":0,"metadata":{},"attempt":0,"retries":0}"#;
+    let _ = source
+        .push(
+            &TaskId::new("t"),
+            StoreMessage::from_bytes(message.to_vec()),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(source.poll().await.unwrap(), Polled::Task { .. }));
+
+    let other = store(&url, &unique("admin"), false).await;
+    let refused = other.release_process(&live).await;
+    assert!(
+        matches!(&refused, Err(PgStoreError::ProcessIdTaken(id)) if *id == live),
+        "{refused:?}"
+    );
+    let own = other.release_process(other.process_id()).await;
+    assert!(
+        matches!(own, Err(PgStoreError::ProcessIdTaken(_))),
+        "{own:?}"
+    );
+    assert_eq!(states(&url, &name).await, [("accepted".to_owned(), 0)]);
+    drop(owner);
+}
+
+/// Criterion 3: a starting process without leases warns about tasks of a
+/// silent owner; with leases it does not — they are taken over anyway.
+#[tokio::test]
+async fn silent_owner_is_reported_on_start() {
+    let Some(url) = url() else { return };
+    let (silent, name) = (unique("silent"), unique("q"));
+    claim_and_crash(&url, &silent, &name, false).await;
+    sleep(3 * ALIVE).await;
+
+    let logs = Logs::default();
+    {
+        let _guard = logs.install();
+        let _plain = PgStore::builder(unique("plain"))
+            .alive_interval(ALIVE)
+            .stale_owner_warning(Duration::from_millis(300))
+            .connect(&url)
+            .await
+            .unwrap();
+    }
+    let records = logs.find("stale_owner", &silent);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert!(records[0].contains("count=2"), "{records:?}");
+
+    let leased = Logs::default();
+    {
+        let _guard = leased.install();
+        let _with_leases = PgStore::builder(unique("leased"))
+            .alive_interval(ALIVE)
+            .lease(LEASE)
+            .stale_owner_warning(Duration::from_millis(300))
+            .connect(&url)
+            .await
+            .unwrap();
+    }
+    assert!(leased.find("stale_owner", &silent).is_empty());
+}

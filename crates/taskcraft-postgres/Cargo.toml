@@ -29,6 +29,8 @@ sqlx = { version = "0.9", default-features = false, features = ["postgres", "run
 serde = { workspace = true, features = ["derive"] }
 taskcraft = { path = "../taskcraft" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
 uuid = { workspace = true }
 
 [lints]

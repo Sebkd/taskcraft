@@ -5,8 +5,8 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
-use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::{PgConnection, PgPool};
 use taskcraft::TaskId;
 use taskcraft::error::ConfigError;
 use taskcraft::source::Notice;
@@ -80,6 +80,7 @@ pub struct PgStoreBuilder {
     alive_interval: Duration,
     cleanup_interval: Duration,
     cleanup_batch: u32,
+    stale_owner_warning: Duration,
 }
 
 impl PgStoreBuilder {
@@ -117,10 +118,24 @@ impl PgStoreBuilder {
         self
     }
 
+    /// Without leases, how long a process may stay silent — no "alive" mark
+    /// — while holding tasks before a starting process warns about it
+    /// (`recovery/stale_owner`): its tasks wait for it to restart, or for
+    /// [`PgStore::release_process`]. Default 1 h.
+    pub fn stale_owner_warning(mut self, threshold: Duration) -> Self {
+        self.stale_owner_warning = threshold;
+        self
+    }
+
     fn validate(&self) -> Result<(), PgStoreError> {
-        let positive = [self.retention, self.alive_interval, self.cleanup_interval]
-            .into_iter()
-            .chain(self.lease.iter().flat_map(|l| [l.duration, l.heartbeat]));
+        let positive = [
+            self.retention,
+            self.alive_interval,
+            self.cleanup_interval,
+            self.stale_owner_warning,
+        ]
+        .into_iter()
+        .chain(self.lease.iter().flat_map(|l| [l.duration, l.heartbeat]));
         for duration in positive {
             if duration.is_zero() {
                 return Err(ConfigError::InvalidDuration {
@@ -180,11 +195,15 @@ impl PgStoreBuilder {
         migrate(&pool).await?;
         claim_process_id(&pool, &self.process_id, self.alive_interval).await?;
         give_back(&pool, &self.process_id).await?;
+        if self.lease.is_none() {
+            warn_stale_owners(&pool, &self.process_id, self.stale_owner_warning).await?;
+        }
         let shared = Arc::new(Shared {
             pool,
             process_id: self.process_id,
             lease: self.lease,
             retention: self.retention,
+            alive_interval: self.alive_interval,
             cleanup_interval: self.cleanup_interval,
             cleanup_batch: self.cleanup_batch,
             queues: Mutex::default(),
@@ -220,6 +239,7 @@ impl PgStore {
             alive_interval: Duration::from_secs(10),
             cleanup_interval: Duration::from_secs(60),
             cleanup_batch: 1000,
+            stale_owner_warning: Duration::from_secs(3600),
         }
     }
 
@@ -247,6 +267,43 @@ impl PgStore {
     pub fn pool(&self) -> &PgPool {
         &self.shared.pool
     }
+
+    /// Gives the tasks of a retired process back to their queues, attempt
+    /// counts kept (rule 2.3.19 p. 6): without leases nothing else takes
+    /// them, and the process will not restart to take them back itself.
+    /// Returns how many tasks went back.
+    ///
+    /// A process counts as retired when its "alive" mark is older than two
+    /// of this store's alive intervals — the processes of one deployment are
+    /// expected to share the interval. Turning leases on makes this call
+    /// unnecessary.
+    ///
+    /// # Errors
+    ///
+    /// [`PgStoreError::ProcessIdTaken`] when the process is alive — this
+    /// process included — and [`PgStoreError::Database`] when the database
+    /// fails.
+    pub async fn release_process(&self, process_id: &str) -> Result<u64, PgStoreError> {
+        let shared = &self.shared;
+        if process_id == shared.process_id {
+            return Err(PgStoreError::ProcessIdTaken(process_id.to_owned()));
+        }
+        let mut tx = shared.pool.begin().await?;
+        if alive(&mut tx, process_id, shared.alive_interval).await? {
+            return Err(PgStoreError::ProcessIdTaken(process_id.to_owned()));
+        }
+        let queues = return_tasks(&mut tx, process_id).await?;
+        tx.commit().await?;
+        let count: i64 = queues.iter().map(|(_, n)| n).sum();
+        info!(
+            event = "recovery",
+            action = "released",
+            "tasks released: owner={}, count={}",
+            process_id,
+            count
+        );
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
 }
 
 impl fmt::Debug for PgStore {
@@ -273,6 +330,7 @@ pub(crate) struct Shared {
     pub(crate) process_id: String,
     pub(crate) lease: Option<Lease>,
     retention: Duration,
+    alive_interval: Duration,
     cleanup_interval: Duration,
     cleanup_batch: u32,
     queues: Mutex<HashMap<Arc<str>, Arc<Held>>>,
@@ -350,18 +408,7 @@ async fn claim_process_id(
     alive_interval: Duration,
 ) -> Result<(), PgStoreError> {
     let mut tx = pool.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
-        .bind(process_id)
-        .execute(&mut *tx)
-        .await?;
-    let alive: Option<bool> = sqlx::query_scalar(
-        "SELECT seen_at > now() - make_interval(secs => $2) FROM taskcraft_processes WHERE id = $1",
-    )
-    .bind(process_id)
-    .bind(2.0 * alive_interval.as_secs_f64())
-    .fetch_optional(&mut *tx)
-    .await?;
-    if alive == Some(true) {
+    if alive(&mut tx, process_id, alive_interval).await? {
         return Err(PgStoreError::ProcessIdTaken(process_id.to_owned()));
     }
     sqlx::query(
@@ -375,10 +422,34 @@ async fn claim_process_id(
     Ok(())
 }
 
-/// Tasks this process held when it stopped go back to their queues with
-/// their attempt counts (rule 2.3.19 p. 1).
-async fn give_back(pool: &PgPool, process_id: &str) -> Result<(), sqlx::Error> {
-    let queues: Vec<(String, i64)> = sqlx::query_as(
+/// Takes the lock of a process id for the transaction and tells whether the
+/// id was marked alive within two intervals (rule 2.3.19 p. 5).
+async fn alive(
+    tx: &mut PgConnection,
+    process_id: &str,
+    alive_interval: Duration,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        .bind(process_id)
+        .execute(&mut *tx)
+        .await?;
+    let alive: Option<bool> = sqlx::query_scalar(
+        "SELECT seen_at > now() - make_interval(secs => $2) FROM taskcraft_processes WHERE id = $1",
+    )
+    .bind(process_id)
+    .bind(2.0 * alive_interval.as_secs_f64())
+    .fetch_optional(&mut *tx)
+    .await?;
+    Ok(alive == Some(true))
+}
+
+/// Puts the unfinished tasks of `owner` back into their queues, attempt
+/// counts kept; returns how many per queue.
+async fn return_tasks(
+    conn: &mut PgConnection,
+    owner: &str,
+) -> Result<Vec<(String, i64)>, sqlx::Error> {
+    sqlx::query_as(
         "WITH back AS (
              UPDATE taskcraft_tasks
                 SET state = 'queued', owner = NULL, lease_until = NULL, updated_at = now()
@@ -386,9 +457,16 @@ async fn give_back(pool: &PgPool, process_id: &str) -> Result<(), sqlx::Error> {
           RETURNING queue)
          SELECT queue, count(*) FROM back GROUP BY queue",
     )
-    .bind(process_id)
-    .fetch_all(pool)
-    .await?;
+    .bind(owner)
+    .fetch_all(conn)
+    .await
+}
+
+/// Tasks this process held when it stopped go back to their queues with
+/// their attempt counts (rule 2.3.19 p. 1).
+async fn give_back(pool: &PgPool, process_id: &str) -> Result<(), sqlx::Error> {
+    let mut conn = pool.acquire().await?;
+    let queues = return_tasks(&mut conn, process_id).await?;
     for (queue, count) in queues {
         info!(
             event = "recovery",
@@ -396,6 +474,42 @@ async fn give_back(pool: &PgPool, process_id: &str) -> Result<(), sqlx::Error> {
             "tasks recovered: queue={}, count={}",
             queue,
             count
+        );
+    }
+    Ok(())
+}
+
+/// Warns about tasks held by other processes silent for longer than
+/// `threshold` (rule 2.3.19 p. 6): without leases they wait for their owner.
+async fn warn_stale_owners(
+    pool: &PgPool,
+    process_id: &str,
+    threshold: Duration,
+) -> Result<(), sqlx::Error> {
+    let owners: Vec<(String, i64, Option<f64>)> = sqlx::query_as(
+        "SELECT t.owner, count(*), extract(epoch FROM now() - max(p.seen_at))::float8
+           FROM taskcraft_tasks t
+           LEFT JOIN taskcraft_processes p ON p.id = t.owner
+          WHERE t.owner IS NOT NULL AND t.owner <> $1
+            AND t.state IN ('accepted', 'running', 'retry_waiting')
+            AND (p.seen_at IS NULL OR p.seen_at < now() - make_interval(secs => $2))
+          GROUP BY t.owner",
+    )
+    .bind(process_id)
+    .bind(threshold.as_secs_f64())
+    .fetch_all(pool)
+    .await?;
+    for (owner, count, silent) in owners {
+        let silent_for = silent
+            .and_then(|s| Duration::try_from_secs_f64(s).ok())
+            .map_or_else(|| "unknown".to_owned(), |d| format!("{d:?}"));
+        warn!(
+            event = "recovery",
+            action = "stale_owner",
+            "tasks held by a silent process: owner={}, count={}, silent_for={}; release them with PgStore::release_process or turn leases on",
+            owner,
+            count,
+            silent_for
         );
     }
     Ok(())
@@ -547,6 +661,12 @@ mod tests {
         assert!(
             builder()
                 .cleanup_interval(Duration::ZERO)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            builder()
+                .stale_owner_warning(Duration::ZERO)
                 .validate()
                 .is_err()
         );

@@ -93,10 +93,36 @@ async fn store(pool: sqlx::PgPool) -> Result<PgStore, PgStoreError> {
   a request; the owner cancels it at its next renewal.
 
 Settings: `lease` (default off; 60 s / 15 s when on), `retention` (7 days),
+`stale_owner_warning` (1 h, see below),
 `alive_interval` (10 s), `cleanup_interval` (60 s) and `cleanup_batch`
 (1000): finished tasks past retention are removed by index, a batch at a
 time. Features `tls-rustls` and `tls-native-tls` enable
 TLS for the connections the store opens itself.
+
+## Retiring a process
+
+Without leases a task stays with the process that took it until that
+process, restarted with the same id, gives it back. When a process is
+retired for good — fewer pods, a new naming scheme — its tasks would wait
+forever:
+
+- **Platforms with a varying number of processes** (autoscaling, pod names
+  that change): turn leases on, and any process takes over the tasks of one
+  that stopped renewing them.
+- **Without leases:** a starting process warns about tasks held by a process
+  silent for longer than `stale_owner_warning` (`recovery/stale_owner`).
+  Give them back with `release_process`, attempt counts kept:
+
+```rust,no_run
+# async fn retire(store: taskcraft_postgres::PgStore) -> Result<(), taskcraft_postgres::PgStoreError> {
+let released = store.release_process("billing-7").await?; // refused while billing-7 is alive
+println!("{released} tasks back in their queues");
+# Ok(()) }
+```
+
+A process counts as retired once its "alive" mark is older than two alive
+intervals of the calling store; keep the interval the same across the
+deployment.
 
 ## Testing
 
