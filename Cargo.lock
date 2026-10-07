@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "readme-check"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "metrics-exporter-prometheus",
  "serde",
@@ -1849,7 +1849,7 @@ dependencies = [
 
 [[package]]
 name = "taskcraft"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "log",
  "loom",
@@ -1871,7 +1871,7 @@ dependencies = [
 
 [[package]]
 name = "taskcraft-benches"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "criterion",
  "taskcraft",
@@ -1880,7 +1880,7 @@ dependencies = [
 
 [[package]]
 name = "taskcraft-kafka"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "rdkafka",
  "serde",
@@ -1895,7 +1895,7 @@ dependencies = [
 
 [[package]]
 name = "taskcraft-postgres"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",
