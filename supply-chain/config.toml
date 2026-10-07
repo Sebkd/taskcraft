@@ -23,6 +23,14 @@ audit-as-crates-io = false
 version = "1.1.5"
 criteria = "safe-to-run"
 
+[[exemptions.alloca]]
+version = "0.4.0"
+criteria = "safe-to-run"
+
+[[exemptions.anstyle]]
+version = "1.0.14"
+criteria = "safe-to-run"
+
 [[exemptions.atoi]]
 version = "2.0.0"
 criteria = "safe-to-deploy"
@@ -59,6 +67,18 @@ criteria = "safe-to-deploy"
 version = "0.10.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.clap]]
+version = "4.6.7"
+criteria = "safe-to-run"
+
+[[exemptions.clap_builder]]
+version = "4.6.7"
+criteria = "safe-to-run"
+
+[[exemptions.clap_lex]]
+version = "1.1.1"
+criteria = "safe-to-run"
+
 [[exemptions.cmov]]
 version = "0.5.4"
 criteria = "safe-to-deploy"
@@ -82,6 +102,14 @@ criteria = "safe-to-deploy"
 [[exemptions.crc-catalog]]
 version = "2.5.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.criterion]]
+version = "0.8.2"
+criteria = "safe-to-run"
+
+[[exemptions.criterion-plot]]
+version = "0.8.2"
+criteria = "safe-to-run"
 
 [[exemptions.crossbeam-epoch]]
 version = "0.9.21"
@@ -151,10 +179,6 @@ criteria = "safe-to-deploy"
 version = "0.3.34"
 criteria = "safe-to-deploy"
 
-[[exemptions.futures-core]]
-version = "0.3.34"
-criteria = "safe-to-deploy"
-
 [[exemptions.futures-intrusive]]
 version = "0.5.0"
 criteria = "safe-to-deploy"
@@ -194,6 +218,10 @@ criteria = "safe-to-run"
 [[exemptions.getrandom]]
 version = "0.4.3"
 criteria = "safe-to-deploy"
+
+[[exemptions.half]]
+version = "2.7.1"
+criteria = "safe-to-run"
 
 [[exemptions.hashbag]]
 version = "0.1.13"
@@ -258,6 +286,10 @@ criteria = "safe-to-deploy"
 [[exemptions.indexmap]]
 version = "2.14.2"
 criteria = "safe-to-deploy"
+
+[[exemptions.itertools]]
+version = "0.13.0"
+criteria = "safe-to-run"
 
 [[exemptions.itoa]]
 version = "1.0.18"
@@ -359,6 +391,10 @@ criteria = "safe-to-deploy"
 version = "5.5.0"
 criteria = "safe-to-run"
 
+[[exemptions.page_size]]
+version = "0.6.0"
+criteria = "safe-to-run"
+
 [[exemptions.parking_lot]]
 version = "0.12.5"
 criteria = "safe-to-deploy"
@@ -369,10 +405,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.pin-project-lite]]
 version = "0.2.17"
-criteria = "safe-to-deploy"
-
-[[exemptions.pkg-config]]
-version = "0.3.34"
 criteria = "safe-to-deploy"
 
 [[exemptions.portable-atomic]]
@@ -446,6 +478,10 @@ criteria = "safe-to-deploy"
 [[exemptions.redox_syscall]]
 version = "0.5.18"
 criteria = "safe-to-deploy"
+
+[[exemptions.regex]]
+version = "1.13.1"
+criteria = "safe-to-run"
 
 [[exemptions.regex-automata]]
 version = "0.4.18"
@@ -663,10 +699,6 @@ criteria = "safe-to-deploy"
 version = "0.1.31"
 criteria = "safe-to-deploy"
 
-[[exemptions.tracing-core]]
-version = "0.1.36"
-criteria = "safe-to-deploy"
-
 [[exemptions.tracing-serde]]
 version = "0.2.0"
 criteria = "safe-to-run"
@@ -706,6 +738,10 @@ criteria = "safe-to-deploy"
 [[exemptions.version_check]]
 version = "0.9.5"
 criteria = "safe-to-deploy"
+
+[[exemptions.walkdir]]
+version = "2.4.0"
+criteria = "safe-to-run"
 
 [[exemptions.wasi]]
 version = "0.11.0+wasi-snapshot-preview1"

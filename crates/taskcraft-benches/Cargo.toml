@@ -1,0 +1,24 @@
+[package]
+name = "taskcraft-benches"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Benchmarks of taskcraft: per-task overhead, throughput, push latency; never published"
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support", "async_tokio"] }
+taskcraft = { path = "../taskcraft", features = ["metrics"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+
+[[bench]]
+name = "worker"
+harness = false
+
+[lints]
+workspace = true
