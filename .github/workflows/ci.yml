@@ -94,7 +94,7 @@ jobs:
           done
 
   msrv:
-    name: Check MSRV (1.99)
+    name: MSRV (1.99)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -105,10 +105,127 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
-      # Library surface only (no --all-targets): dev-dependencies may require a
-      # newer compiler than the crates' own MSRV.
+      # Every test on the minimum compiler, without services (those tests
+      # skip). Should a dev-dependency ever require a newer compiler, narrow
+      # this to `-p taskcraft` rather than dropping the tests.
+      - name: Test
+        run: cargo test --workspace --all-features --locked
+
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # Development happens on macOS: rdkafka's native build and tool paths
+      # differ from Linux. No services here; the tests that need them skip.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --all-features --locked
+
+  semver:
+    name: API compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+
+      # Against the latest published version of each package: while the
+      # workspace version equals it, a breaking change fails here instead of
+      # slipping into a patch release.
       - name: Check
-        run: cargo check --workspace --all-features --locked
+        run: cargo semver-checks --workspace --all-features
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    services:
+      kafka:
+        image: apache/kafka:3.9.0
+        ports:
+          - 9092:9092
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      TASKCRAFT_KAFKA_BROKERS: localhost:9092
+      TASKCRAFT_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres
+      TASKCRAFT_REQUIRE_SERVICES: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Wait for the broker
+        run: |
+          for i in $(seq 1 60); do
+            nc -z localhost 9092 && exit 0
+            sleep 2
+          done
+          echo "::error::broker did not start"
+          exit 1
+
+      # Doc tests are not measured (that needs nightly). The broker tests run
+      # on one thread, as in the Kafka job.
+      - name: Measure
+        run: |
+          cargo llvm-cov --no-report --workspace --all-features --locked --exclude taskcraft-kafka
+          cargo llvm-cov --no-report -p taskcraft-kafka --all-features --locked -- --test-threads 1
+
+      # The threshold sits a little below the first measurement (89.9% of
+      # lines on 0.2.1); changes that add tests raise it.
+      - name: Report
+        run: |
+          cargo llvm-cov report --summary-only
+          cargo llvm-cov report --html --output-dir coverage
+          cargo llvm-cov report --lcov --output-path coverage/lcov.info --fail-under-lines 87
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage
+          retention-days: 14
 
   kafka:
     name: Kafka source (broker)
