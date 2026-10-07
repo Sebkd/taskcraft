@@ -12,10 +12,11 @@ use std::time::Duration;
 
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use serde::{Deserialize, Serialize};
+use taskcraft::codec::IdentityCodec;
+use taskcraft::observe::{Event, MetricsObserver, Observer};
 use taskcraft::{
-    AckPoint, Attempt, CancellationToken, Event, IdentityCodec, InMemorySource, Meta,
-    MetadataRegistry, MetricsObserver, Monitor, Observer, Outcome, Queue, RetryPolicy, Task,
-    TaskState, task_fn,
+    AckPoint, Attempt, CancellationToken, InMemorySource, Meta, MetadataRegistry, Monitor, Outcome,
+    Queue, RetryPolicy, Task, TaskState, task_fn,
 };
 use tokio::time::sleep;
 
@@ -138,9 +139,8 @@ async fn adapter_and_own_observer_agree() {
         })
         .build()
         .unwrap();
-    let handle = queue.handle();
     let own = Arc::new(OwnCounters::default());
-    let monitor = Monitor::new()
+    let (monitor, handle) = Monitor::new()
         .observer(MetricsObserver::new())
         .observer(Arc::clone(&own))
         .register(queue)
@@ -264,8 +264,7 @@ async fn arguments_and_metadata_stay_out_of_logs_and_labels() {
         })
         .build()
         .unwrap();
-    let handle = queue.handle();
-    let monitor = Monitor::new()
+    let (monitor, handle) = Monitor::new()
         .observer(MetricsObserver::new())
         .register(queue)
         .unwrap();

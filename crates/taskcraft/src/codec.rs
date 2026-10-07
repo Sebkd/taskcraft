@@ -8,6 +8,7 @@ use serde_json::{Map, Value};
 
 use crate::error::MetadataError;
 use crate::metadata::MetadataRegistry;
+use crate::source::StoreMessage;
 use crate::task::{AckPoint, Task, TaskId, TaskParts};
 
 /// A message that could not be turned into a task, or a task that could not
@@ -147,6 +148,21 @@ where
     }
 }
 
+/// The built-in codec of a task store: the same JSON envelope, as a
+/// [`StoreMessage`].
+impl<Args> Codec<Args, StoreMessage> for JsonCodec
+where
+    Args: Serialize + DeserializeOwned + Send + 'static,
+{
+    fn encode(&self, task: Task<Args>) -> Result<StoreMessage, CodecError> {
+        Codec::<Args, Vec<u8>>::encode(self, task).map(StoreMessage::from_bytes)
+    }
+
+    fn decode(&self, message: StoreMessage) -> Result<Task<Args>, CodecError> {
+        Codec::<Args, Vec<u8>>::decode(self, message.into_bytes())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,7 +196,7 @@ mod tests {
         parts.retries = 2;
         let codec = codec();
 
-        let bytes = codec.encode(Task::from_parts(parts)).unwrap();
+        let bytes: Vec<u8> = codec.encode(Task::from_parts(parts)).unwrap();
         let back: Task<Report> = codec.decode(bytes).unwrap();
 
         assert_eq!(back.id().as_str(), "r-1");

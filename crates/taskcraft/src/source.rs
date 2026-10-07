@@ -1,12 +1,28 @@
 //! The source contract: where a queue takes tasks from and acknowledges them
 //! to (spec 2.3.1, 2.3.9, 2.3.10, 2.5).
+//!
+//! Three traits, by what a source can do:
+//!
+//! - [`Source`] — a stream to consume, such as a Kafka topic: poll and ack.
+//!   A queue on it is built with [`Queue::consumer`](crate::Queue::consumer);
+//!   its handle cannot push.
+//! - [`PushSource`] — a source tasks are pushed into from code, such as the
+//!   [`InMemorySource`](crate::InMemorySource):
+//!   [`Queue::builder`](crate::Queue::builder).
+//! - [`TaskStore`] — a durable store that records every task's state, such
+//!   as the PostgreSQL store: [`Queue::on_store`](crate::Queue::on_store),
+//!   with the built-in JSON codec.
 
 use std::fmt;
 use std::future::Future;
+use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
+pub use crate::memory::Delivery;
+pub use crate::offset::OffsetTracker;
+pub use crate::poll::{Poller, Wakeup};
 use crate::state::TaskState;
 use crate::status::{FinishReason, TaskStatus};
 use crate::task::{AckPoint, TaskId};
@@ -72,7 +88,6 @@ pub enum AckPointSupport {
 #[non_exhaustive]
 pub struct Capabilities {
     ack_point: AckPointSupport,
-    push: bool,
     defer: bool,
     transactional_ack: bool,
 }
@@ -83,20 +98,13 @@ impl Capabilities {
     pub const fn new(ack_point: AckPointSupport) -> Self {
         Self {
             ack_point,
-            push: false,
             defer: false,
             transactional_ack: false,
         }
     }
 
-    /// The source accepts tasks pushed from code.
-    #[must_use]
-    pub const fn with_push(mut self) -> Self {
-        self.push = true;
-        self
-    }
-
-    /// The source can take a task back with a delivery delay.
+    /// The source can take a task back with a delivery delay: it implements
+    /// [`PushSource::defer`].
     #[must_use]
     pub const fn with_defer(mut self) -> Self {
         self.defer = true;
@@ -115,12 +123,6 @@ impl Capabilities {
     #[must_use]
     pub const fn ack_point_support(&self) -> AckPointSupport {
         self.ack_point
-    }
-
-    /// Whether tasks can be pushed from code.
-    #[must_use]
-    pub const fn accepts_push(&self) -> bool {
-        self.push
     }
 
     /// Whether the source supports deferred redelivery.
@@ -253,9 +255,6 @@ impl Notices {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum PushError<E> {
-    /// The source does not accept pushes.
-    #[error("source does not accept pushes")]
-    Unsupported,
     /// The source is closed.
     #[error("source is closed")]
     Closed,
@@ -327,7 +326,35 @@ impl Default for WakeHandle {
     }
 }
 
-/// A source of tasks.
+/// The message of a [`TaskStore`]: a task in the JSON envelope of
+/// [`JsonCodec`](crate::codec::JsonCodec), as bytes.
+///
+/// A store keeps these bytes as they are; only the built-in codec of
+/// [`Queue::on_store`](crate::Queue::on_store) reads and writes them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreMessage(Vec<u8>);
+
+impl StoreMessage {
+    /// A message of these bytes, as the store read them.
+    #[must_use]
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    /// The bytes, to store.
+    #[must_use]
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
+
+    /// The bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// A source of tasks: a stream the queue polls and acknowledges to.
 ///
 /// Methods take `&self`: acks arrive from tasks finishing concurrently with
 /// polling, so a source synchronises itself and is shared behind an `Arc`.
@@ -358,65 +385,29 @@ pub trait Source: Send + Sync + 'static {
         None
     }
 
-    /// Stores a pushed task, checking its id. Only for sources that
-    /// [accept pushes](Capabilities::accepts_push).
+    /// Notices about tasks this process holds and background failures of
+    /// the source. Taken once, by the queue's worker. The default has none.
+    fn notices(&self) -> Option<Notices> {
+        None
+    }
+}
+
+/// A source that tasks are pushed into from code; a queue on it is built
+/// with [`Queue::builder`](crate::Queue::builder) and its handle pushes.
+pub trait PushSource: Source {
+    /// Stores a pushed task, checking its id.
     fn push(
         &self,
         id: &TaskId,
         message: Self::Message,
-    ) -> impl Future<Output = Result<PushResult, PushError<Self::Error>>> + Send {
-        let _ = (id, message);
-        async { Err(PushError::Unsupported) }
-    }
+    ) -> impl Future<Output = Result<PushResult, PushError<Self::Error>>> + Send;
 
     /// Takes back a task that is stored but not handed out yet — ready or
-    /// deferred — and frees its id; a task store also records a request to
-    /// cancel a task another process holds. The default holds nothing.
-    fn remove(&self, id: &TaskId) -> impl Future<Output = Result<Withdrawal, Self::Error>> + Send {
-        let _ = id;
-        async { Ok(Withdrawal::NotFound) }
-    }
+    /// deferred — and frees its id.
+    fn remove(&self, id: &TaskId) -> impl Future<Output = Result<Withdrawal, Self::Error>> + Send;
 
-    /// Records how a task ended, in place of [`ack`](Self::ack), for sources
-    /// that keep task history. The default acks.
-    fn complete(
-        &self,
-        receipt: Self::Receipt,
-        completion: Completion<'_>,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
-        let _ = completion;
-        self.ack(receipt)
-    }
-
-    /// Records where a task stands: accepted, running, waiting to retry.
-    /// The default records nothing.
-    fn progress(
-        &self,
-        receipt: Self::Receipt,
-        progress: Progress,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
-        let _ = (receipt, progress);
-        async { Ok(()) }
-    }
-
-    /// The status of a task the source keeps, including finished ones. The
-    /// default keeps none.
-    fn status(
-        &self,
-        id: &TaskId,
-    ) -> impl Future<Output = Result<Option<TaskStatus>, Self::Error>> + Send {
-        let _ = id;
-        async { Ok(None) }
-    }
-
-    /// Notices about tasks this process holds: cancel requests and lost
-    /// leases. Taken once, by the queue's worker. The default has none.
-    fn notices(&self) -> Option<Notices> {
-        None
-    }
-
-    /// Takes a delivered task back, to be handed out again at `at`. Only for
-    /// sources that [support defer](Capabilities::supports_defer).
+    /// Takes a delivered task back, to be handed out again at `at`. Declare
+    /// it with [`Capabilities::with_defer`]; the default does not support it.
     fn defer(
         &self,
         receipt: Self::Receipt,
@@ -427,6 +418,93 @@ pub trait Source: Send + Sync + 'static {
         async { Err(DeferError::Unsupported) }
     }
 }
+
+/// A durable task store: it records accept, progress and every final state,
+/// keeps finished tasks for status requests and hands tasks out under leases
+/// (rule 2.3.9 p. 6). A queue on it is built with
+/// [`Queue::on_store`](crate::Queue::on_store).
+///
+/// Not a [`Source`]: a store's outcome is recorded by
+/// [`complete`](Self::complete), never by a plain ack, so it cannot be
+/// consumed as a stream by mistake. Its ack point is fixed
+/// ([`AckPointSupport::Fixed`]); push and defer are always supported.
+pub trait TaskStore: Send + Sync + 'static {
+    /// What identifies one delivery.
+    type Receipt: Clone + Send + 'static;
+    /// A store failure such as a lost connection.
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Asks for the next task, taking it under this process's lease.
+    fn poll(
+        &self,
+    ) -> impl Future<Output = Result<Polled<StoreMessage, Self::Receipt>, Self::Error>> + Send;
+
+    /// Stores a pushed task, checking its id against live and finished
+    /// tasks.
+    fn push(
+        &self,
+        id: &TaskId,
+        message: StoreMessage,
+    ) -> impl Future<Output = Result<PushResult, PushError<Self::Error>>> + Send;
+
+    /// Takes back a task that is stored but not handed out yet, or records
+    /// a request to cancel a task another process holds.
+    fn remove(&self, id: &TaskId) -> impl Future<Output = Result<Withdrawal, Self::Error>> + Send;
+
+    /// Takes a delivered task back, to be handed out again at `at`.
+    fn defer(
+        &self,
+        receipt: Self::Receipt,
+        message: StoreMessage,
+        at: Instant,
+    ) -> impl Future<Output = Result<(), DeferError<Self::Error>>> + Send;
+
+    /// Records how a task ended.
+    fn complete(
+        &self,
+        receipt: Self::Receipt,
+        completion: Completion<'_>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Records where a task stands: accepted, running, waiting to retry.
+    fn progress(
+        &self,
+        receipt: Self::Receipt,
+        progress: Progress,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// The status of a task, including finished ones.
+    fn status(
+        &self,
+        id: &TaskId,
+    ) -> impl Future<Output = Result<Option<TaskStatus>, Self::Error>> + Send;
+
+    /// A wake-up signal, if the store can tell when work arrives.
+    fn subscribe(&self) -> Option<WakeSignal> {
+        None
+    }
+
+    /// Notices about tasks this process holds: cancel requests, lost and
+    /// taken-over leases. Taken once, by the queue's worker.
+    fn notices(&self) -> Option<Notices> {
+        None
+    }
+}
+
+/// A [`Source`] as a queue consumes it; the type of a queue built with
+/// [`Queue::consumer`](crate::Queue::consumer).
+#[derive(Debug)]
+pub struct Consumed<S>(pub(crate) Arc<S>);
+
+/// A [`PushSource`] as a queue uses it; the type of a queue built with
+/// [`Queue::builder`](crate::Queue::builder).
+#[derive(Debug)]
+pub struct Pushed<S>(pub(crate) Arc<S>);
+
+/// A [`TaskStore`] as a queue uses it; the type of a queue built with
+/// [`Queue::on_store`](crate::Queue::on_store).
+#[derive(Debug)]
+pub struct Stored<S>(pub(crate) Arc<S>);
 
 #[cfg(test)]
 mod tests {
@@ -455,10 +533,8 @@ mod tests {
 
     #[test]
     fn capability_builders() {
-        let caps = Capabilities::new(AckPointSupport::PerTask)
-            .with_push()
-            .with_defer();
-        assert!(caps.accepts_push() && caps.supports_defer() && !caps.transactional_ack());
+        let caps = Capabilities::new(AckPointSupport::PerTask).with_defer();
+        assert!(caps.supports_defer() && !caps.transactional_ack());
     }
 
     #[tokio::test]

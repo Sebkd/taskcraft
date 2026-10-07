@@ -29,10 +29,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use statecraft_fsm::fsm;
+use taskcraft::codec::IdentityCodec;
+use taskcraft::observe::{Event, Observer};
+use taskcraft::runnable::{OutcomeSlot, Run, SpawnedMachine};
 use taskcraft::{
-    BoxError, CancelOutcome, CancellationToken, Data, Event, IdentityCodec, InMemorySource,
-    Monitor, Observer, Outcome, OutcomeSlot, Queue, Run, SharedData, SpawnedMachine, Task,
-    TaskError, TaskId, TaskState, task_fn,
+    BoxError, CancelOutcome, CancellationToken, Data, InMemorySource, Monitor, Outcome, Queue,
+    SharedData, Task, TaskError, TaskId, TaskState, task_fn,
 };
 use tokio::time::sleep;
 
@@ -212,7 +214,7 @@ impl Finals {
     }
 }
 
-type Handle = taskcraft::QueueHandle<InMemorySource<String>, IdentityCodec<String>, String>;
+type Handle = taskcraft::QueueHandle<String>;
 
 /// A process: the exports queue with the copy pool, recovering from the
 /// consumer's records.
@@ -255,8 +257,7 @@ fn process(
         )
     })
     .build()?;
-    let handle = queue.handle();
-    let monitor = Monitor::new()
+    let (monitor, handle) = Monitor::new()
         .pool("copy", 1)?
         .observer(Arc::clone(finals))
         .register(queue)?;

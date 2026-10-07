@@ -11,9 +11,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use statecraft_fsm::fsm;
+use taskcraft::codec::IdentityCodec;
+use taskcraft::runnable::{OutcomeSlot, Run, Runnable, SpawnedMachine};
 use taskcraft::{
-    AckPoint, CancelOutcome, CancellationToken, IdentityCodec, InMemorySource, Monitor, Outcome,
-    OutcomeSlot, Queue, Run, Runnable, SpawnedMachine, Task, TaskError, TaskId, task_fn,
+    AckPoint, CancelOutcome, CancellationToken, InMemorySource, Monitor, Outcome, Queue, Task,
+    TaskError, TaskId, task_fn,
 };
 use tokio::time::sleep;
 
@@ -89,7 +91,7 @@ async fn export(mode: Mode, stopped: Arc<AtomicBool>) -> Result<Run<SpawnedMachi
 struct Setup {
     logs: Captured,
     source: Arc<InMemorySource<Mode>>,
-    handle: taskcraft::QueueHandle<InMemorySource<Mode>, IdentityCodec<Mode>, Mode>,
+    handle: taskcraft::QueueHandle<Mode>,
     stopped: Arc<AtomicBool>,
     stop: CancellationToken,
     monitor: tokio::task::JoinHandle<taskcraft::ShutdownReport>,
@@ -110,9 +112,9 @@ fn start(logs: Captured) -> Setup {
     .cancel_grace(10 * SEC)
     .build()
     .unwrap();
-    let handle = queue.handle();
     let stop = CancellationToken::new();
-    let monitor = tokio::spawn(run(Monitor::new().register(queue).unwrap(), stop.clone()));
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
+    let monitor = tokio::spawn(run(monitor, stop.clone()));
     Setup {
         logs,
         source,
@@ -234,9 +236,9 @@ async fn own_runnable_runs_like_a_machine() {
     .ack_point(AckPoint::OnCompletion)
     .build()
     .unwrap();
-    let handle = queue.handle();
     let stop = CancellationToken::new();
-    let monitor = tokio::spawn(run(Monitor::new().register(queue).unwrap(), stop.clone()));
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
+    let monitor = tokio::spawn(run(monitor, stop.clone()));
     let _ = handle.push(Task::new(20)).await.unwrap();
     assert!(until(5 * SEC, || finished_with(&logs, "succeeded")).await);
     assert!(until(SEC, || source.is_empty()).await);

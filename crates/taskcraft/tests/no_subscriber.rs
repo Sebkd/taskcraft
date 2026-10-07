@@ -6,7 +6,8 @@
 
 use std::sync::Arc;
 
-use taskcraft::{CancellationToken, IdentityCodec, InMemorySource, Monitor, Queue, Task, task_fn};
+use taskcraft::codec::IdentityCodec;
+use taskcraft::{CancellationToken, InMemorySource, Monitor, Queue, Task, task_fn};
 
 #[tokio::test]
 async fn no_subscriber_is_installed() {
@@ -20,9 +21,9 @@ async fn no_subscriber_is_installed() {
     .no_recovery()
     .build()
     .unwrap();
-    let handle = queue.handle();
     let stop = CancellationToken::new();
-    let running = tokio::spawn(Monitor::new().register(queue).unwrap().run(stop.clone()));
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
+    let running = tokio::spawn(monitor.run(stop.clone()));
     let _ = handle.push(Task::new(1)).await.unwrap();
     while !source.is_empty() || handle.live_tasks() > 0 {
         tokio::task::yield_now().await;

@@ -11,9 +11,11 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
+use taskcraft::codec::{Codec, IdentityCodec, JsonCodec};
+use taskcraft::observe::{Event, Observer};
 use taskcraft::{
-    CancellationToken, Codec, Event, IdentityCodec, InMemorySource, JsonCodec, Meta,
-    MetadataRegistry, Monitor, Observer, Queue, Task, TaskState, task_fn,
+    CancellationToken, InMemorySource, Meta, MetadataRegistry, Monitor, Queue, Task, TaskState,
+    task_fn,
 };
 
 /// Prints failures and remembers them.
@@ -78,13 +80,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .no_recovery()
     .build()?;
-    let (mail_handle, export_handle) = (mail.handle(), exports.handle());
     let stop = CancellationToken::new();
     let failures = Arc::new(Failures::default());
-    let monitor = Monitor::new()
-        .observer(Arc::clone(&failures))
-        .register(mail)?
-        .register(exports)?;
+    let monitor = Monitor::new().observer(Arc::clone(&failures));
+    let (monitor, mail_handle) = monitor.register(mail)?;
+    let (monitor, export_handle) = monitor.register(exports)?;
     let running = tokio::spawn(monitor.run(stop.clone()));
 
     let letter = Task::new("invoice".to_owned()).with_meta(Recipient {

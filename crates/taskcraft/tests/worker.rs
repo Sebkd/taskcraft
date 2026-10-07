@@ -8,13 +8,16 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use taskcraft::handler::{BoxFuture, TaskRequest};
+use taskcraft::source::{
+    Capabilities, Polled, PushError, PushResult, PushSource, Pushed, Source, WakeSignal, Withdrawal,
+};
 use taskcraft::testing::{
     FaultyCodec, FaultySource, InjectedError, Runner, RunnerSetup, Scripted, scenarios,
 };
 use taskcraft::{
-    AckPoint, BoxFuture, CancellationToken, Capabilities, Monitor, Outcome, PollStrategy, Polled,
-    PushError, PushResult, QueueReport, RetryPolicy, ShutdownReport, Source, StopReason, Task,
-    TaskError, TaskId, TaskRequest, WakeSignal, task_fn,
+    AckPoint, CancellationToken, Monitor, Outcome, PollStrategy, QueueReport, RetryPolicy,
+    ShutdownReport, StopReason, Task, TaskError, TaskId, task_fn,
 };
 use taskcraft::{Queue, QueueBuilder};
 use tokio::task::JoinHandle;
@@ -30,7 +33,7 @@ const SEC: Duration = Duration::from_secs(1);
 type Faulty = Arc<FaultySource<u32>>;
 
 fn start<Svc>(
-    builder: QueueBuilder<FaultySource<u32>, FaultyCodec<u32>, Svc, u32>,
+    builder: QueueBuilder<Pushed<FaultySource<u32>>, FaultyCodec<u32>, Svc, u32>,
     monitor: Monitor,
 ) -> (JoinHandle<ShutdownReport>, CancellationToken)
 where
@@ -40,7 +43,7 @@ where
 {
     let queue = builder.no_recovery().build().unwrap();
     let stop = CancellationToken::new();
-    let monitor = monitor.register(queue).unwrap();
+    let monitor = monitor.register(queue).unwrap().0;
     let handle = tokio::spawn(common::run(monitor, stop.clone()));
     (handle, stop)
 }
@@ -48,7 +51,7 @@ where
 fn queue_of<Svc>(
     source: &Faulty,
     service: Svc,
-) -> QueueBuilder<FaultySource<u32>, FaultyCodec<u32>, Svc, u32> {
+) -> QueueBuilder<Pushed<FaultySource<u32>>, FaultyCodec<u32>, Svc, u32> {
     Queue::builder("q", Arc::clone(source), FaultyCodec::new(), service)
 }
 
@@ -219,13 +222,19 @@ impl Source for Timed {
     fn subscribe(&self) -> Option<WakeSignal> {
         self.inner.subscribe()
     }
+}
 
+impl PushSource for Timed {
     async fn push(
         &self,
         id: &TaskId,
         message: Scripted<u32>,
     ) -> Result<PushResult, PushError<InjectedError>> {
         self.inner.push(id, message).await
+    }
+
+    async fn remove(&self, _id: &TaskId) -> Result<Withdrawal, InjectedError> {
+        Ok(Withdrawal::NotFound)
     }
 }
 
@@ -256,7 +265,7 @@ async fn source_errors_restart_with_growing_delays() {
     .build()
     .unwrap();
     let stop = CancellationToken::new();
-    let monitor = Monitor::new().register(queue).unwrap();
+    let monitor = Monitor::new().register(queue).unwrap().0;
     let worker = tokio::spawn(common::run(monitor, stop.clone()));
 
     source.inner.enqueue(Task::new(1));
@@ -509,7 +518,7 @@ impl Runner for WorkerRunner {
             .no_recovery()
             .build()
             .unwrap();
-        let monitor = Monitor::new().register(queue).unwrap();
+        let monitor = Monitor::new().register(queue).unwrap().0;
         Box::pin(async move {
             monitor.run(setup.stop).await.unwrap();
         })

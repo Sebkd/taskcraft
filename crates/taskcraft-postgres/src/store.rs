@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
-use taskcraft::{ConfigError, Notice, TaskId};
+use taskcraft::TaskId;
+use taskcraft::error::ConfigError;
+use taskcraft::source::Notice;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
@@ -198,7 +200,7 @@ impl PgStoreBuilder {
 /// keep their tasks outside the process.
 ///
 /// One store per process; [`queue`](Self::queue) gives the source of one
-/// queue. Pair it with [`JsonCodec`](taskcraft::JsonCodec).
+/// queue. Pair it with [`JsonCodec`](taskcraft::codec::JsonCodec).
 #[derive(Clone)]
 pub struct PgStore {
     shared: Arc<Shared>,
@@ -220,7 +222,7 @@ impl PgStore {
     #[must_use]
     pub fn queue(&self, name: impl Into<String>) -> PgSource {
         let name: Arc<str> = name.into().into();
-        let (notify, notices) = taskcraft::Notices::channel();
+        let (notify, notices) = taskcraft::source::Notices::channel();
         let held = Arc::new(Held {
             tasks: Mutex::default(),
             notify,

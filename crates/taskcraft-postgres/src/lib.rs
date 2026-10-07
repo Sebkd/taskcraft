@@ -15,10 +15,13 @@
 //!   id.
 //! - **Leases** ([`Lease`]): any process takes over a task whose owner
 //!   stopped renewing it.
+//! - **Queues** on the store are built with `Queue::on_store`: tasks are
+//!   stored as JSON with the built-in codec, which names metadata through
+//!   the queue's metadata registry.
 //!
 //! ```no_run
 //! use std::sync::Arc;
-//! use taskcraft::{CancellationToken, JsonCodec, MetadataRegistry, Monitor, Queue, task_fn};
+//! use taskcraft::{CancellationToken, Monitor, Queue, Task, task_fn};
 //! use taskcraft_postgres::{Lease, PgStore};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,11 +32,15 @@
 //!     .connect("postgres://app:secret@db:5432/app")
 //!     .await?;
 //! let source = Arc::new(store.queue("exports"));
-//! let queue = Queue::builder("exports", source, JsonCodec::new(MetadataRegistry::new()), task_fn(export))
+//! let queue = Queue::on_store("exports", source, task_fn(export))
 //!     .concurrency(4)
 //!     .build()?;
-//! let report = Monitor::new().register(queue)?.run(CancellationToken::new()).await?;
-//! # let _ = report;
+//! let (monitor, exports) = Monitor::new().register(queue)?;
+//! let stop = CancellationToken::new();
+//! let running = tokio::spawn(monitor.run(stop.clone()));
+//! let _ = exports.push(Task::new("2026-10".to_owned())).await?;
+//! # stop.cancel();
+//! # let _ = running.await??;
 //! # Ok(()) }
 //! ```
 //!

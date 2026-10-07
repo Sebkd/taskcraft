@@ -29,13 +29,13 @@ restart and can be asked about — and stopped — by id.
 
 ```toml
 [dependencies]
-taskcraft = "0.1"
+taskcraft = "0.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
 ```rust
 use std::sync::Arc;
-use taskcraft::{CancellationToken, IdentityCodec, InMemorySource, Monitor, Queue, Task, task_fn};
+use taskcraft::prelude::*;
 
 async fn send_report(month: String) {
     println!("report for {month} sent");
@@ -47,9 +47,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .concurrency(4)
         .no_recovery() // in-memory tasks may be lost on a crash: said out loud
         .build()?;
-    let reports = queue.handle();
+    let (monitor, reports) = Monitor::new().register(queue)?; // the handle comes with registration
     let stop = CancellationToken::new();
-    let monitor = tokio::spawn(Monitor::new().register(queue)?.run(stop.clone()));
+    let monitor = tokio::spawn(monitor.run(stop.clone()));
 
     let _ = reports.push(Task::new("2026-10".to_owned())).await?;
 
@@ -63,6 +63,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 A handler is a plain `async fn` of the task's arguments plus any values it
 wants to extract: `Attempt`, `TaskId`, `Meta<T>`, `Data<T>`, `Cancel`.
+
+Upgrading from 0.1? See the [migration guide](https://github.com/Sebkd/taskcraft/blob/master/MIGRATION.md).
 
 ## A tour
 
@@ -102,13 +104,14 @@ wrapped later. Full example: [`outcomes`](https://github.com/Sebkd/taskcraft/blo
 ```rust
 use std::sync::Arc;
 use std::time::Duration;
-use taskcraft::{IdentityCodec, InMemorySource, Queue, RetryPolicy, Task, task_fn};
+use taskcraft::codec::IdentityCodec;
+use taskcraft::{InMemorySource, Queue, RetryPolicy, Task, task_fn};
 
 async fn notify_partner(order: u32) { /* waits up to six hours for an answer */ }
 
 fn reply_busy(order: u32) { /* tell the sender to come back later */ }
 
-fn build() -> Result<(), taskcraft::ConfigError> {
+fn build() -> Result<(), taskcraft::error::ConfigError> {
     let _notify = Queue::builder("notify", Arc::new(InMemorySource::default()), IdentityCodec::new(), task_fn(notify_partner))
         .concurrency(2)
         // Full? Refuse at once and answer the sender; intake never blocks.
@@ -127,7 +130,8 @@ Full example: [`long-tasks-reject`](https://github.com/Sebkd/taskcraft/blob/mast
 
 ```rust
 use std::sync::Arc;
-use taskcraft::{Cancel, CancelOutcome, IdentityCodec, InMemorySource, Monitor, Queue, TaskId, task_fn};
+use taskcraft::codec::IdentityCodec;
+use taskcraft::{Cancel, CancelOutcome, InMemorySource, Monitor, Queue, TaskId, task_fn};
 
 async fn unpack(archive: String, cancel: Cancel) {
     tokio::select! {
@@ -143,8 +147,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .pool("disk-io", 1) // every attempt takes one permit of the shared pool
         .no_recovery()
         .build()?;
-    let unpacks = queue.handle();
-    let _monitor = Monitor::new().pool("disk-io", 2)?.register(queue)?;
+    let (_monitor, unpacks) = Monitor::new().pool("disk-io", 2)?.register(queue)?;
 
     let id = TaskId::new("archive-17");
     if let Some(status) = unpacks.status(&id) {
@@ -164,9 +167,10 @@ example: [`resource-pools`](https://github.com/Sebkd/taskcraft/blob/master/crate
 ### Idempotent push
 
 ```rust
-use taskcraft::{InMemorySource, IdentityCodec, PushOutcome, QueueHandle, Task};
+use taskcraft::{PushOutcome, QueueHandle, Task};
 
-async fn ask(reports: &QueueHandle<InMemorySource<String>, IdentityCodec<String>, String>) -> Result<(), Box<dyn std::error::Error>> {
+// A handle is typed by the task's arguments only, whatever the source.
+async fn ask(reports: &QueueHandle<String>) -> Result<(), Box<dyn std::error::Error>> {
     // The id says what the task is: one report per month.
     let task = Task::new("2026-10".to_owned()).with_id("report-2026-10");
     match reports.push(task).await? {
@@ -218,13 +222,14 @@ store the hook is required; `no_recovery()` says losing them is fine.
 
 ```rust
 use std::sync::Arc;
-use taskcraft::{BoxError, IdentityCodec, InMemorySource, Queue, Task, task_fn};
+use taskcraft::codec::IdentityCodec;
+use taskcraft::{BoxError, InMemorySource, Queue, Task, task_fn};
 
 async fn export(job: String) {}
 
 async fn unfinished_jobs() -> Result<Vec<String>, BoxError> { Ok(Vec::new()) }
 
-fn build() -> Result<(), taskcraft::ConfigError> {
+fn build() -> Result<(), taskcraft::error::ConfigError> {
     let _exports = Queue::builder("exports", Arc::new(InMemorySource::default()), IdentityCodec::new(), task_fn(export))
         // Runs once at start, before the first poll; an error keeps the
         // monitor from starting rather than silently losing work.
@@ -249,7 +254,8 @@ the task's outcome. `SpawnedMachine` runs a
 
 ```rust
 use statecraft_fsm::fsm;
-use taskcraft::{CancellationToken, Outcome, OutcomeSlot, Run, SpawnedMachine, TaskError};
+use taskcraft::runnable::{OutcomeSlot, Run, SpawnedMachine};
+use taskcraft::{CancellationToken, Outcome, TaskError};
 
 #[derive(Debug)]
 pub struct ExportContext {
@@ -288,6 +294,21 @@ recovery from the step it stopped at — is the
 [`fsm-pipeline`](https://github.com/Sebkd/taskcraft/blob/master/crates/taskcraft/examples/fsm-pipeline.rs)
 example.
 
+### Three kinds of source
+
+What a source can do decides how its queue is built and what its handle
+offers — checked by the compiler:
+
+| Source | Trait | Queue | Handle |
+|--------|-------|-------|--------|
+| Tasks pushed from code: in-memory, your own | `source::PushSource` | `Queue::builder` | `QueueHandle`: push, status, cancel |
+| A stream to consume: Kafka, an outbox table | `source::Source` | `Queue::consumer` | `ConsumerHandle`: status, cancel |
+| A durable task store: PostgreSQL | `source::TaskStore` | `Queue::on_store` (JSON codec built in) | `QueueHandle` |
+
+Your own source implements `Source` (poll, ack) and, if tasks are pushed into
+it, `PushSource` (push, remove). Full example:
+[`custom-source`](https://github.com/Sebkd/taskcraft/blob/master/crates/taskcraft/examples/custom-source.rs).
+
 ### Kafka source
 
 ```rust,no_run
@@ -300,11 +321,13 @@ async fn export(table: u32) {}
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let source = KafkaSource::builder("localhost:9092", "exports", "exporters").build()?;
-    let queue = Queue::builder("exports", Arc::new(source), KafkaJsonCodec::new(MetadataRegistry::new()), task_fn(export))
+    // A consumed topic: producers write to it, the handle asks and cancels.
+    let queue = Queue::consumer("exports", Arc::new(source), KafkaJsonCodec::new(MetadataRegistry::new()), task_fn(export))
         .ack_point(AckPoint::OnCompletion) // an offset is committed only past finished tasks
         .concurrency(4)
         .build()?;
-    Monitor::new().register(queue)?.run(CancellationToken::new()).await?;
+    let (monitor, _exports) = Monitor::new().register(queue)?;
+    monitor.run(CancellationToken::new()).await?;
     Ok(())
 }
 ```
@@ -317,7 +340,7 @@ metadata, and Kafka shares partitions between the processes of a group. See
 
 ```rust,no_run
 use std::sync::Arc;
-use taskcraft::{BoxError, CancellationToken, JsonCodec, MetadataRegistry, Monitor, Queue, TaskId, task_fn};
+use taskcraft::{BoxError, CancellationToken, Monitor, Queue, TaskId, task_fn};
 use taskcraft_postgres::{Lease, PgStore};
 
 async fn transfer(id: String) {}
@@ -328,10 +351,11 @@ async fn main() -> Result<(), BoxError> {
         .lease(Lease::default())               // a crashed process's tasks go to another one
         .connect("postgres://app:secret@db:5432/app") // or .with_pool(pool), e.g. from sea-orm
         .await?;
-    let queue = Queue::builder("transfers", Arc::new(store.queue("transfers")), JsonCodec::new(MetadataRegistry::new()), task_fn(transfer))
+    // Tasks are kept as JSON: the codec is built in.
+    let queue = Queue::on_store("transfers", Arc::new(store.queue("transfers")), task_fn(transfer))
         .build()?;
-    let transfers = queue.handle();
-    let running = tokio::spawn(Monitor::new().register(queue)?.run(CancellationToken::new()));
+    let (monitor, transfers) = Monitor::new().register(queue)?;
+    let running = tokio::spawn(monitor.run(CancellationToken::new()));
 
     // Status of any task: other processes' and finished ones too.
     if let Some(status) = transfers.fetch_status(&TaskId::new("transfer-42")).await? {
@@ -349,7 +373,8 @@ processes. See [`taskcraft-postgres`](https://crates.io/crates/taskcraft-postgre
 
 ```rust
 use std::sync::atomic::{AtomicU64, Ordering};
-use taskcraft::{Event, MetricsObserver, Monitor, Observer, TaskState};
+use taskcraft::observe::{Event, MetricsObserver, Observer};
+use taskcraft::{Monitor, TaskState};
 
 /// Your own registry gets the same events as the `metrics` adapter.
 #[derive(Default)]
@@ -364,6 +389,7 @@ impl Observer for Panics {
 }
 
 fn monitor() -> Monitor {
+    // Observers see every queue of the monitor, added before or after them.
     Monitor::new()
         .observer(MetricsObserver::new()) // feature `metrics`: taskcraft_tasks_finished_total{queue, outcome}, …
         .observer(Panics::default())
@@ -411,7 +437,7 @@ fn faults() {
 
 | Feature of `taskcraft` | What |
 |------------------------|------|
-| `metrics` | `MetricsObserver`: the standard series through the `metrics` facade |
+| `metrics` | `observe::MetricsObserver`: the standard series through the `metrics` facade |
 | `log` | Library events also as `log` records while no `tracing` subscriber is set |
 | `test-util` | `taskcraft::testing`: fault-injecting source, delivery ledger, scenarios |
 
@@ -444,6 +470,13 @@ The tests and examples use:
 | `TASKCRAFT_KAFKA_BROKERS` | `taskcraft-kafka` tests and example | Broker address; tests without it skip, the example uses `localhost:9092` |
 | `TASKCRAFT_POSTGRES_URL` | `taskcraft-postgres` tests and examples | Connection string; tests without it skip, examples use the docker compose database |
 | `TASKCRAFT_REQUIRE_SERVICES` | CI | Fail, instead of skipping, a test whose service address is missing |
+
+## Modules
+
+Everyday names are at the root and in `taskcraft::prelude`; the rest sits
+in modules: `source` (the source traits, polls, offsets), `codec`, `handler`
+(the tower side of handlers), `observe`, `runnable`, `error`, and `testing`
+with `test-util`.
 
 ## Examples and specification
 

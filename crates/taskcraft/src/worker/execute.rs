@@ -14,6 +14,7 @@ use tracing::{Instrument, debug, debug_span, error, warn};
 use super::pools::PoolHeld;
 use super::{ExecCtx, Slot, TaskEnd};
 use crate::attempt::run_attempt;
+use crate::backend::Backend;
 use crate::codec::Codec;
 use crate::handler::TaskRequest;
 use crate::metadata::TraceParent;
@@ -21,7 +22,7 @@ use crate::observe::{AttemptEnd, Event, Waiting};
 use crate::outcome::{BoxError, Outcome};
 use crate::queue::TimeoutOutcome;
 use crate::registry::TaskRegistry;
-use crate::source::{Completion, Progress, Source};
+use crate::source::{Completion, Progress};
 use crate::state::{Lifecycle, TaskState};
 use crate::status::FinishReason;
 use crate::task::{Task, TaskId};
@@ -35,7 +36,7 @@ enum Next {
 }
 
 /// One task on its way through the worker.
-struct Run<S: Source> {
+struct Run<S: Backend> {
     id: TaskId,
     life: Lifecycle,
     receipt: Option<S::Receipt>,
@@ -43,7 +44,7 @@ struct Run<S: Source> {
     cancel: CancellationToken,
 }
 
-impl<S: Source> Run<S> {
+impl<S: Backend> Run<S> {
     /// Cancelled by shutdown while waiting: no ack (scenario 2.2.7).
     fn cancelled_waiting<C>(&mut self, ctx: &ExecCtx<S, C>, attempt: u32) -> TaskEnd {
         cancel_waiting(ctx, &mut self.life, &self.id, attempt)
@@ -79,7 +80,7 @@ pub(super) async fn execute<S, C, Svc, Args>(
     ctx: Arc<ExecCtx<S, C>>,
 ) -> TaskEnd
 where
-    S: Source,
+    S: Backend,
     C: Codec<Args, S::Message>,
     Svc: tower::Service<TaskRequest<Args>, Response = Outcome> + Send + 'static,
     Svc::Error: Into<BoxError>,
@@ -146,7 +147,7 @@ where
 /// after it), then the pools in name order. Shutdown cancels a task that is
 /// still waiting (rule 2.3.14 p. 4), and so does a cancel request (spec
 /// 2.1.2.15 p. 2): then the task's end comes back as the error.
-async fn acquire<S: Source, C>(
+async fn acquire<S: Backend, C>(
     ctx: &ExecCtx<S, C>,
     run: &mut Run<S>,
     slot: Slot,
@@ -205,7 +206,7 @@ async fn run_once<S, C, Svc, Args>(
     service: &mut Svc,
 ) -> Next
 where
-    S: Source,
+    S: Backend,
     C: Codec<Args, S::Message>,
     Svc: tower::Service<TaskRequest<Args>, Response = Outcome> + Send + 'static,
     Svc::Error: Into<BoxError>,
@@ -298,7 +299,7 @@ where
 /// Waiting to retry: pools go back always, the slot unless the policy keeps
 /// it (rule 2.3.5). Returns the kept slot, or the task's end when shutdown or
 /// a cancel request comes first.
-async fn wait_retry<S: Source, C>(
+async fn wait_retry<S: Backend, C>(
     ctx: &ExecCtx<S, C>,
     run: &mut Run<S>,
     attempt: u32,
@@ -349,7 +350,7 @@ async fn wait_retry<S: Source, C>(
 }
 
 /// Acks a delivery that ends before it runs; a task store records how.
-pub(super) async fn settle<S: Source>(
+pub(super) async fn settle<S: Backend>(
     source: &S,
     receipt: S::Receipt,
     store: bool,
@@ -363,7 +364,7 @@ pub(super) async fn settle<S: Source>(
 }
 
 /// Tells a source that keeps task history where the task stands.
-async fn record<S: Source, C>(
+async fn record<S: Backend, C>(
     ctx: &ExecCtx<S, C>,
     receipt: Option<S::Receipt>,
     state: TaskState,
@@ -403,7 +404,7 @@ async fn forced_abort(
 
 /// Completes `grace` after the attempt timeout expired; never without a
 /// timeout (rule 2.3.16, spec 2.1.2.13).
-async fn expire<S: Source, C>(
+async fn expire<S: Backend, C>(
     ctx: &ExecCtx<S, C>,
     attempt_cancel: &CancellationToken,
     timed_out: &AtomicBool,
@@ -429,7 +430,7 @@ async fn expire<S: Source, C>(
 
 /// The final state or defer: logged, taken out of the registry and acked
 /// unless deferred or cancelled by shutdown (rule 2.3.9, spec 2.1.2.15 p. 8).
-async fn finish<S: Source, C>(
+async fn finish<S: Backend, C>(
     ctx: &ExecCtx<S, C>,
     life: &mut Lifecycle,
     id: &TaskId,
@@ -481,7 +482,7 @@ async fn attempt<S, C, Svc, Args>(
     ctx: &ExecCtx<S, C>,
 ) -> Outcome
 where
-    S: Source,
+    S: Backend,
     Svc: tower::Service<TaskRequest<Args>, Response = Outcome>,
     Svc::Error: Into<BoxError>,
 {
@@ -532,7 +533,7 @@ async fn decide<S, C, Args>(
     ctx: &ExecCtx<S, C>,
 ) -> Next
 where
-    S: Source,
+    S: Backend,
     C: Codec<Args, S::Message>,
     Args: Clone,
 {
@@ -600,7 +601,7 @@ where
 
 /// A task cancelled by shutdown while still waiting for a slot or a pool:
 /// "Accepted" → "Cancelled", no ack (scenario 2.2.7).
-fn cancel_waiting<S: Source, C>(
+fn cancel_waiting<S: Backend, C>(
     ctx: &ExecCtx<S, C>,
     life: &mut Lifecycle,
     id: &TaskId,
@@ -632,7 +633,7 @@ async fn defer<S, C, Args>(
     delay: Duration,
 ) -> Result<(), String>
 where
-    S: Source,
+    S: Backend,
     C: Codec<Args, S::Message>,
 {
     let message = ctx.codec.encode(task).map_err(|e| e.to_string())?;

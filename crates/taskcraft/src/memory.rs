@@ -9,8 +9,8 @@ use tokio::time::Instant;
 
 use crate::error::ConfigError;
 use crate::source::{
-    AckPointSupport, Capabilities, CloseReason, DeferError, Polled, PushError, PushResult, Source,
-    WakeHandle, WakeSignal, Withdrawal,
+    AckPointSupport, Capabilities, CloseReason, DeferError, Polled, PushError, PushResult,
+    PushSource, Source, WakeHandle, WakeSignal, Withdrawal,
 };
 use crate::task::{Task, TaskId};
 
@@ -120,9 +120,7 @@ impl<Args: Send + 'static> Source for InMemorySource<Args> {
     type Error = Infallible;
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities::new(AckPointSupport::PerTask)
-            .with_push()
-            .with_defer()
+        Capabilities::new(AckPointSupport::PerTask).with_defer()
     }
 
     async fn poll(&self) -> Result<Polled<Task<Args>, Delivery>, Infallible> {
@@ -161,7 +159,9 @@ impl<Args: Send + 'static> Source for InMemorySource<Args> {
     fn subscribe(&self) -> Option<WakeSignal> {
         Some(self.wake.subscribe())
     }
+}
 
+impl<Args: Send + 'static> PushSource for InMemorySource<Args> {
     async fn push(
         &self,
         id: &TaskId,

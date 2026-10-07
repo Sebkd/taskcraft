@@ -6,9 +6,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use taskcraft::handler::{TaskRequest, run_attempt};
 use taskcraft::{
-    FinishReason, MetadataRegistry, Outcome, ResultExt, SharedData, Task, TaskError, TaskRequest,
-    run_attempt, task_fn,
+    FinishReason, MetadataRegistry, Outcome, ResultExt, SharedData, Task, TaskError, task_fn,
 };
 use tower::ServiceBuilder;
 use tower::limit::ConcurrencyLimitLayer;

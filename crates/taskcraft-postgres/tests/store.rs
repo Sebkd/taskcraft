@@ -8,10 +8,10 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use taskcraft::source::{Notice, Polled, StoreMessage, TaskStore};
 use taskcraft::{
-    Attempt, Cancel, CancelOutcome, CancellationToken, FinishReason, JsonCodec, MetadataRegistry,
-    Monitor, Notice, Outcome, Polled, PushOutcome, Queue, QueueHandle, ShutdownReport, Source,
-    Task, TaskId, TaskState, task_fn,
+    Attempt, Cancel, CancelOutcome, CancellationToken, FinishReason, Monitor, Outcome, PushOutcome,
+    Queue, QueueHandle, ShutdownReport, Task, TaskId, TaskState, task_fn,
 };
 use taskcraft_postgres::{Lease, PgSource, PgStore, PgStoreError};
 use tokio::task::JoinHandle;
@@ -60,7 +60,7 @@ async fn until(limit: Duration, cond: impl AsyncFn() -> bool) -> bool {
     .is_ok()
 }
 
-type Handle = QueueHandle<PgSource, JsonCodec, u32>;
+type Handle = QueueHandle<u32>;
 
 /// A queue on `source` running `n`: 0 succeeds, 1 aborts, 2 panics, 3 waits
 /// for its cancel flag, 4 runs for an hour.
@@ -84,17 +84,12 @@ fn queue(name: &str, source: PgSource, seen: &Arc<Mutex<Vec<(u32, u32)>>>) -> (M
             }
         }
     });
-    let queue = Queue::builder(
-        name,
-        Arc::new(source),
-        JsonCodec::new(MetadataRegistry::new()),
-        handler,
-    )
-    .cancel_grace(SEC)
-    .build()
-    .unwrap();
-    let handle = queue.handle();
-    (Monitor::new().register(queue).unwrap(), handle)
+    let queue = Queue::on_store(name, Arc::new(source), handler)
+        .cancel_grace(SEC)
+        .build()
+        .unwrap();
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
+    (monitor, handle)
 }
 
 fn run(monitor: Monitor) -> (JoinHandle<ShutdownReport>, CancellationToken) {
@@ -177,7 +172,10 @@ async fn one_task_goes_to_one_process() {
     let (a, b) = (a.queue(&name), b.queue(&name));
     let message = br#"{"id":"only","args":1,"metadata":{},"attempt":0,"retries":0}"#;
     let _ = a
-        .push(&TaskId::new("only"), message.to_vec())
+        .push(
+            &TaskId::new("only"),
+            StoreMessage::from_bytes(message.to_vec()),
+        )
         .await
         .unwrap();
     for _ in 0..5 {
@@ -219,7 +217,10 @@ async fn claim_and_crash(url: &str, process: &str, name: &str, lease: bool) {
         let message =
             format!(r#"{{"id":"{id}","args":0,"metadata":{{}},"attempt":0,"retries":0}}"#);
         let _ = source
-            .push(&TaskId::new(id), message.into_bytes())
+            .push(
+                &TaskId::new(id),
+                StoreMessage::from_bytes(message.into_bytes()),
+            )
             .await
             .unwrap();
     }
@@ -227,7 +228,7 @@ async fn claim_and_crash(url: &str, process: &str, name: &str, lease: bool) {
         let Polled::Task { receipt, .. } = source.poll().await.unwrap() else {
             panic!("expected a task");
         };
-        let progress = taskcraft::Progress {
+        let progress = taskcraft::source::Progress {
             state: TaskState::Running,
             attempt: 1,
             retries: 0,
@@ -277,7 +278,7 @@ async fn expired_lease_is_taken_over() {
         tokio::time::timeout(30 * SEC, async {
             while taken.len() < 2 {
                 if let Polled::Task { message, .. } = b.poll().await.unwrap() {
-                    taken.push(String::from_utf8(message).unwrap());
+                    taken.push(String::from_utf8(message.into_bytes()).unwrap());
                 } else {
                     sleep(Duration::from_millis(100)).await;
                 }

@@ -12,15 +12,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use taskcraft::codec::IdentityCodec;
 use taskcraft::{
-    Cancel, CancelOutcome, CancellationToken, Data, IdentityCodec, InMemorySource, Monitor,
-    Outcome, Queue, QueueHandle, SharedData, Task, TaskId, TaskState, task_fn,
+    Cancel, CancelOutcome, CancellationToken, Data, InMemorySource, Monitor, Outcome, Queue,
+    QueueHandle, SharedData, Task, TaskId, TaskState, task_fn,
 };
 use tokio::time::sleep;
 
 const HOUR: Duration = Duration::from_secs(3600);
 
-type Handle = QueueHandle<InMemorySource<u32>, IdentityCodec<u32>, u32>;
+type Handle = QueueHandle<u32>;
 
 /// How many tasks of a queue hold its pool now, and the most at once.
 #[derive(Default)]
@@ -82,12 +83,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let pack = queues.pop().ok_or("no pack queue")?;
     let unpack = queues.pop().ok_or("no unpack queue")?;
-    let (unpack_handle, pack_handle) = (unpack.handle(), pack.handle());
-    let monitor = Monitor::new()
-        .pool("unpack", 2)?
-        .pool("pack", 1)?
-        .register(unpack)?
-        .register(pack)?;
+    let monitor = Monitor::new().pool("unpack", 2)?.pool("pack", 1)?;
+    let (monitor, unpack_handle) = monitor.register(unpack)?;
+    let (monitor, pack_handle) = monitor.register(pack)?;
     let stop = CancellationToken::new();
     let running = tokio::spawn(monitor.run(stop.clone()));
 

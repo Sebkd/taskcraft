@@ -16,6 +16,7 @@ use tracing::{debug, error, info, warn};
 use super::drain::joined_id;
 use super::execute::{execute, settle};
 use super::{ExecCtx, Slot, TaskEnd};
+use crate::backend::Backend;
 use crate::codec::{Codec, CodecError};
 use crate::handler::TaskRequest;
 use crate::monitor::{StopReason, WorkerContext};
@@ -24,7 +25,7 @@ use crate::outcome::{BoxError, Outcome};
 use crate::poll::{Poller, Wakeup};
 use crate::queue::{DeadLetter, DeadLetterHook, RejectFn};
 use crate::registry::TaskRegistry;
-use crate::source::{Completion, Polled, Source, WakeSignal};
+use crate::source::{Completion, Polled, WakeSignal};
 use crate::state::TaskState;
 use crate::status::FinishReason;
 use crate::task::{AckPoint, Task, TaskId};
@@ -39,7 +40,7 @@ enum Gate<Args> {
 }
 
 /// The state of one worker's intake loop.
-pub(super) struct Intake<S: Source, C, Svc, Args> {
+pub(super) struct Intake<S: Backend, C, Svc, Args> {
     pub(super) ctx: WorkerContext,
     pub(super) name: Arc<str>,
     pub(super) observers: Observers,
@@ -68,7 +69,7 @@ pub(super) struct Intake<S: Source, C, Svc, Args> {
 
 impl<S, C, Svc, Args> Intake<S, C, Svc, Args>
 where
-    S: Source,
+    S: Backend,
     C: Codec<Args, S::Message>,
     Svc: tower::Service<TaskRequest<Args>, Response = Outcome> + Clone + Send + 'static,
     Svc::Error: Into<BoxError>,

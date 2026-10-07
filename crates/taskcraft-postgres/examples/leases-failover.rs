@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use taskcraft::{
-    Attempt, BoxError, CancellationToken, JsonCodec, MetadataRegistry, Monitor, Outcome,
-    PollStrategy, Queue, Task, TaskId, TaskState, task_fn,
+    Attempt, BoxError, CancellationToken, Monitor, Outcome, PollStrategy, Queue, Task, TaskId,
+    TaskState, task_fn,
 };
 use taskcraft_postgres::{Lease, PgStore};
 use tokio::time::sleep;
@@ -44,26 +44,20 @@ async fn main() -> Result<(), BoxError> {
         .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/postgres".to_owned());
     let run = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let queue_name = format!("transfers-{run}");
-    let codec = || JsonCodec::new(MetadataRegistry::new());
 
     // Process A starts first and takes the task.
     let store_a = PgStore::builder(format!("a-{run}"))
         .lease(LEASE)
         .connect(&url)
         .await?;
-    let queue_a = Queue::builder(
+    let queue_a = Queue::on_store(
         &queue_name,
         Arc::new(store_a.queue(&queue_name)),
-        codec(),
         task_fn(transfer_on_a),
     )
     .build()?;
-    let handle_a = queue_a.handle();
-    let running_a = tokio::spawn(
-        Monitor::new()
-            .register(queue_a)?
-            .run(CancellationToken::new()),
-    );
+    let (monitor, handle_a) = Monitor::new().register(queue_a)?;
+    let running_a = tokio::spawn(monitor.run(CancellationToken::new()));
     let _ = handle_a
         .push(Task::new("transfer-42".to_owned()).with_id("transfer-42"))
         .await?;
@@ -83,18 +77,17 @@ async fn main() -> Result<(), BoxError> {
         .lease(LEASE)
         .connect(&url)
         .await?;
-    let queue_b = Queue::builder(
+    let queue_b = Queue::on_store(
         &queue_name,
         Arc::new(store_b.queue(&queue_name)),
-        codec(),
         task_fn(transfer_on_b),
     )
     // Other processes' work (and expired leases) shows up only on polls.
     .poll_strategy(PollStrategy::Interval(Duration::from_millis(200)))
     .build()?;
-    let handle_b = queue_b.handle();
     let stop_b = CancellationToken::new();
-    let running_b = tokio::spawn(Monitor::new().register(queue_b)?.run(stop_b.clone()));
+    let (monitor, handle_b) = Monitor::new().register(queue_b)?;
+    let running_b = tokio::spawn(monitor.run(stop_b.clone()));
     sleep(Duration::from_secs(2)).await;
 
     println!("process A crashes");

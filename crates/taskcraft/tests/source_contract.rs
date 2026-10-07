@@ -8,10 +8,12 @@ use std::collections::{HashSet, VecDeque};
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 
-use taskcraft::{
-    AckPoint, AckPointSupport, Capabilities, CloseReason, Codec, InMemorySource, JsonCodec,
-    MetadataRegistry, OffsetTracker, Polled, PushResult, Source, Task, TaskId,
+use taskcraft::codec::{Codec, JsonCodec};
+use taskcraft::source::{
+    AckPointSupport, Capabilities, CloseReason, OffsetTracker, Polled, PushResult, PushSource,
+    Source,
 };
+use taskcraft::{AckPoint, InMemorySource, MetadataRegistry, Task, TaskId};
 
 /// A table: rows are handed out one by one and deleted on ack.
 #[derive(Default)]

@@ -8,11 +8,14 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use taskcraft::testing::{FaultySource, Runner, RunnerSetup, ScenarioFailure, scenarios};
-use taskcraft::{
-    AckPointSupport, BoxFuture, Capabilities, Codec, InMemorySource, Outcome, Polled, PushError,
-    PushResult, Source, Task, TaskId, TaskParts, TaskRequest, WakeHandle, WakeSignal,
+use taskcraft::codec::Codec;
+use taskcraft::handler::{BoxFuture, TaskRequest};
+use taskcraft::source::{
+    AckPointSupport, Capabilities, Polled, PushError, PushResult, PushSource, Source, WakeHandle,
+    WakeSignal, Withdrawal,
 };
+use taskcraft::testing::{FaultySource, Runner, RunnerSetup, ScenarioFailure, scenarios};
+use taskcraft::{InMemorySource, Outcome, Task, TaskId, TaskParts};
 use tokio::time::sleep;
 
 /// Defects a stub worker can carry. All off: the reference worker.
@@ -200,7 +203,7 @@ impl Source for SingleWakerSource {
     type Error = std::convert::Infallible;
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities::new(AckPointSupport::PerTask).with_push()
+        Capabilities::new(AckPointSupport::PerTask)
     }
 
     async fn poll(&self) -> Result<Polled<Task<u32>, ()>, Self::Error> {
@@ -217,12 +220,18 @@ impl Source for SingleWakerSource {
         *self.slot.lock().unwrap() = Some(handle);
         Some(signal)
     }
+}
 
+impl PushSource for SingleWakerSource {
     async fn push(&self, _: &TaskId, _: Task<u32>) -> Result<PushResult, PushError<Self::Error>> {
         if let Some(handle) = self.slot.lock().unwrap().as_ref() {
             handle.wake();
         }
         Ok(PushResult::Stored)
+    }
+
+    async fn remove(&self, _id: &TaskId) -> Result<Withdrawal, Self::Error> {
+        Ok(Withdrawal::NotFound)
     }
 }
 

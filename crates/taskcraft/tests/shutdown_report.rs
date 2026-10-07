@@ -7,9 +7,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use taskcraft::codec::IdentityCodec;
+use taskcraft::source::{PushSource, Source};
 use taskcraft::{
-    Cancel, CancelOutcome, CancellationToken, IdentityCodec, InMemorySource, Monitor, PollStrategy,
-    Queue, QueueReport, Source, StopReason, Task, TaskId, task_fn,
+    Cancel, CancelOutcome, CancellationToken, InMemorySource, Monitor, PollStrategy, Queue,
+    QueueReport, StopReason, Task, TaskId, task_fn,
 };
 use tokio::time::sleep;
 
@@ -52,9 +54,9 @@ async fn tasks_ended_before_the_signal_are_not_counted() {
         .no_recovery()
         .build()
         .unwrap();
-    let handle = queue.handle();
     let stop = CancellationToken::new();
-    let running = tokio::spawn(Monitor::new().register(queue).unwrap().run(stop.clone()));
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
+    let running = tokio::spawn(monitor.run(stop.clone()));
     let _ = handle.push(Task::new(0)).await.unwrap();
     let _ = handle.push(Task::new(1).with_id("waits")).await.unwrap();
     assert!(
@@ -83,13 +85,8 @@ async fn closed_source_counts_only_the_drained_task() {
         .no_recovery()
         .build()
         .unwrap();
-    let handle = queue.handle();
-    let running = tokio::spawn(
-        Monitor::new()
-            .register(queue)
-            .unwrap()
-            .run(CancellationToken::new()),
-    );
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
+    let running = tokio::spawn(monitor.run(CancellationToken::new()));
     let _ = handle.push(Task::new(0)).await.unwrap();
     let _ = handle.push(Task::new(10)).await.unwrap();
     assert!(
@@ -117,10 +114,10 @@ async fn shutdown_signal_ends_a_closed_source_drain() {
         .no_recovery()
         .build()
         .unwrap();
-    let handle = queue.handle();
     let stop = CancellationToken::new();
     let monitor = Monitor::new().shutdown_timeout(5 * SEC);
-    let running = tokio::spawn(monitor.register(queue).unwrap().run(stop.clone()));
+    let (monitor, handle) = monitor.register(queue).unwrap();
+    let running = tokio::spawn(monitor.run(stop.clone()));
     let _ = handle.push(Task::new(3600)).await.unwrap();
     assert!(until(SEC, || handle.live_tasks() == 1).await);
     source.close();
@@ -149,9 +146,9 @@ struct Finals(
     >,
 );
 
-impl taskcraft::Observer for Finals {
-    fn on_event(&self, event: &taskcraft::Event<'_>) {
-        if let taskcraft::Event::Finished {
+impl taskcraft::observe::Observer for Finals {
+    fn on_event(&self, event: &taskcraft::observe::Event<'_>) {
+        if let taskcraft::observe::Event::Finished {
             task_id,
             state,
             reason,
@@ -176,9 +173,8 @@ async fn aborted_task_has_an_outcome() {
         .no_recovery()
         .build()
         .unwrap();
-    let handle = queue.handle();
     let finals = Arc::new(Finals::default());
-    let monitor = Monitor::new()
+    let (monitor, handle) = Monitor::new()
         .shutdown_timeout(SEC)
         .observer(Arc::clone(&finals))
         .register(queue)
@@ -220,35 +216,40 @@ struct GatedSource {
 
 impl Source for GatedSource {
     type Message = Task<u32>;
-    type Receipt = taskcraft::Delivery;
+    type Receipt = taskcraft::source::Delivery;
     type Error = std::convert::Infallible;
 
-    fn capabilities(&self) -> taskcraft::Capabilities {
+    fn capabilities(&self) -> taskcraft::source::Capabilities {
         self.inner.capabilities()
     }
 
-    async fn poll(&self) -> Result<taskcraft::Polled<Task<u32>, taskcraft::Delivery>, Self::Error> {
+    async fn poll(
+        &self,
+    ) -> Result<taskcraft::source::Polled<Task<u32>, taskcraft::source::Delivery>, Self::Error>
+    {
         self.inner.poll().await
     }
 
-    async fn ack(&self, receipt: taskcraft::Delivery) -> Result<(), Self::Error> {
+    async fn ack(&self, receipt: taskcraft::source::Delivery) -> Result<(), Self::Error> {
         self.inner.ack(receipt).await
     }
 
-    fn subscribe(&self) -> Option<taskcraft::WakeSignal> {
+    fn subscribe(&self) -> Option<taskcraft::source::WakeSignal> {
         self.inner.subscribe()
     }
+}
 
+impl PushSource for GatedSource {
     async fn push(
         &self,
         id: &TaskId,
         message: Task<u32>,
-    ) -> Result<taskcraft::PushResult, taskcraft::PushError<Self::Error>> {
+    ) -> Result<taskcraft::source::PushResult, taskcraft::source::PushError<Self::Error>> {
         let _pass = self.gate.acquire().await.unwrap();
         self.inner.push(id, message).await
     }
 
-    async fn remove(&self, id: &TaskId) -> Result<taskcraft::Withdrawal, Self::Error> {
+    async fn remove(&self, id: &TaskId) -> Result<taskcraft::source::Withdrawal, Self::Error> {
         self.inner.remove(id).await
     }
 }
@@ -265,9 +266,9 @@ async fn push_racing_the_shutdown_leaves_nothing_behind() {
         .no_recovery()
         .build()
         .unwrap();
-    let handle = queue.handle();
     let stop = CancellationToken::new();
-    let running = tokio::spawn(Monitor::new().register(queue).unwrap().run(stop.clone()));
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
+    let running = tokio::spawn(monitor.run(stop.clone()));
     sleep(SEC).await;
 
     // The push passes the "stopping?" check, then waits inside the write.
@@ -282,7 +283,7 @@ async fn push_racing_the_shutdown_leaves_nothing_behind() {
 
     let pushed = pushing.await.unwrap();
     assert!(
-        matches!(pushed, Err(taskcraft::PushTaskError::Stopping)),
+        matches!(pushed, Err(taskcraft::error::PushTaskError::Stopping)),
         "{pushed:?}"
     );
     assert!(source.inner.is_empty(), "nothing left where nobody polls");

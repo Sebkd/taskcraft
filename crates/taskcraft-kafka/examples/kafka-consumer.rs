@@ -46,7 +46,7 @@ fn process(
     let source = KafkaSource::builder(brokers, topic, group).build()?;
     let mut shared = SharedData::new();
     shared.insert((name.to_owned(), Arc::clone(ledger)));
-    let queue = Queue::builder(
+    let queue = Queue::consumer(
         "exports",
         Arc::new(source),
         KafkaJsonCodec::new(MetadataRegistry::new()),
@@ -58,7 +58,9 @@ fn process(
     // exports come back from the consumer's own records.
     .recover_with(|| async { Ok::<Vec<Task<u32>>, BoxError>(Vec::new()) })
     .build()?;
-    Ok(Monitor::new().register(queue)?)
+    // A consumed topic: the handle asks and cancels, producers push.
+    let (monitor, _exports) = Monitor::new().register(queue)?;
+    Ok(monitor)
 }
 
 #[tokio::main]

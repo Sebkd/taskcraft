@@ -4,7 +4,8 @@ use std::marker::PhantomData;
 
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
-use taskcraft::{Codec, CodecError, MetadataRegistry, Task, TaskId};
+use taskcraft::codec::{Codec, CodecError};
+use taskcraft::{MetadataRegistry, Task, TaskId};
 
 /// A message read from the topic, owned and detached from the client.
 #[derive(Debug, Clone, PartialEq, Eq)]

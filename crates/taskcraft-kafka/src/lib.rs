@@ -13,8 +13,11 @@
 //! - **Consumer groups** share partitions between processes; no lease is
 //!   needed per task.
 //!
-//! Queues on this source ack on accept by default, which needs a recovery
-//! hook (`QueueBuilder::recover_with`), or ack on completion:
+//! A queue consumes the topic: it is built with `Queue::consumer`, and its
+//! handle (`ConsumerHandle`) asks about tasks and cancels them but does not
+//! push — producers write to the topic. Queues on this source ack on accept
+//! by default, which needs a recovery hook (`QueueBuilder::recover_with`), or
+//! ack on completion:
 //!
 //! ```no_run
 //! use std::sync::Arc;
@@ -26,11 +29,12 @@
 //!
 //! let source = KafkaSource::builder("localhost:9092", "exports", "export-workers").build()?;
 //! let codec = KafkaJsonCodec::new(MetadataRegistry::new());
-//! let queue = Queue::builder("exports", Arc::new(source), codec, task_fn(export))
+//! let queue = Queue::consumer("exports", Arc::new(source), codec, task_fn(export))
 //!     .ack_point(AckPoint::OnCompletion)
 //!     .concurrency(4)
 //!     .build()?;
-//! let report = Monitor::new().register(queue)?.run(CancellationToken::new()).await?;
+//! let (monitor, _exports) = Monitor::new().register(queue)?;
+//! let report = monitor.run(CancellationToken::new()).await?;
 //! # let _ = report;
 //! # Ok(()) }
 //! ```

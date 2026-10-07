@@ -9,11 +9,15 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use taskcraft::codec::{CodecError, IdentityCodec, JsonCodec};
+use taskcraft::error::PushTaskError;
+use taskcraft::source::{
+    AckPointSupport, Capabilities, Polled, PushError, PushResult, PushSource, Source, Withdrawal,
+};
 use taskcraft::{
-    AckPoint, AckPointSupport, Attempt, Cancel, CancelOutcome, CancellationToken, Capabilities,
-    CodecError, IdentityCodec, InMemorySource, JsonCodec, MetadataRegistry, Monitor, Outcome,
-    Polled, PushError, PushOutcome, PushResult, PushTaskError, Queue, RetryPolicy, ShutdownReport,
-    Source, Task, TaskId, TaskState, task_fn,
+    AckPoint, Attempt, Cancel, CancelOutcome, CancellationToken, InMemorySource, MetadataRegistry,
+    Monitor, Outcome, PushOutcome, Queue, QueueHandle, RetryPolicy, ShutdownReport, Task, TaskId,
+    TaskState, task_fn,
 };
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
@@ -77,8 +81,8 @@ async fn concurrent_pushes_with_one_id_create_one_task() {
         .no_recovery()
         .build()
         .unwrap();
-    let handle = queue.handle();
-    let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap());
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
+    let (monitor, stop) = spawn(monitor);
 
     let (first, second) = tokio::join!(handle.push(task("x", 1)), handle.push(task("x", 2)));
     let mut answers = [first.unwrap(), second.unwrap()];
@@ -129,12 +133,12 @@ async fn registry_is_empty_after_many_tasks() {
         .no_recovery()
         .build()
         .unwrap();
-    let handle = queue.handle();
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
     for n in 0..TASKS {
         let pushed = handle.push(Task::new(n)).await.unwrap();
         assert!(matches!(pushed, PushOutcome::Enqueued { .. }));
     }
-    let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap());
+    let (monitor, stop) = spawn(monitor);
     assert!(until(600 * SEC, || source.is_empty()).await);
     assert_eq!(handle.live_tasks(), 0);
     stop.cancel();
@@ -158,8 +162,8 @@ async fn cooperative_handler_stops_on_cancel() {
         .no_recovery()
         .build()
         .unwrap();
-    let handle = queue.handle();
-    let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap());
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
+    let (monitor, stop) = spawn(monitor);
     let id = TaskId::new("c");
     let _ = handle.push(task("c", 1)).await.unwrap();
     assert!(
@@ -207,8 +211,8 @@ async fn ignoring_handler_is_aborted_after_the_grace() {
         .no_recovery()
         .build()
         .unwrap();
-    let handle = queue.handle();
-    let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap());
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
+    let (monitor, stop) = spawn(monitor);
     let id = TaskId::new("stuck");
     let _ = handle.push(task("stuck", 1)).await.unwrap();
     assert!(until(SEC, || handle.live_tasks() == 1).await);
@@ -241,14 +245,14 @@ async fn queued_task_is_removed_from_the_source() {
         .no_recovery()
         .build()
         .unwrap();
-    let handle = queue.handle();
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
     let id = TaskId::new("q1");
     let _ = handle.push(task("q1", 1)).await.unwrap();
     assert_eq!(handle.cancel(&id).await, CancelOutcome::Cancelled);
     assert!(source.is_empty());
     assert_eq!(handle.cancel(&id).await, CancelOutcome::Unknown);
 
-    let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap());
+    let (monitor, stop) = spawn(monitor);
     sleep(10 * SEC).await;
     assert_eq!(runs(&runs_seen), 0);
     stop.cancel();
@@ -270,8 +274,8 @@ async fn cancel_during_a_retry_pause() {
         .no_recovery()
         .build()
         .unwrap();
-    let handle = queue.handle();
-    let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap());
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
+    let (monitor, stop) = spawn(monitor);
     let id = TaskId::new("r");
     let _ = handle.push(task("r", 1)).await.unwrap();
     assert!(
@@ -311,8 +315,8 @@ async fn cancel_while_waiting_for_a_slot() {
         .no_recovery()
         .build()
         .unwrap();
-    let handle = queue.handle();
-    let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap());
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
+    let (monitor, stop) = spawn(monitor);
     let _ = handle.push(task("busy", 1)).await.unwrap();
     let _ = handle.push(task("waiting", 2)).await.unwrap();
     let waiting = TaskId::new("waiting");
@@ -339,10 +343,10 @@ async fn status_of_a_running_task() {
         .no_recovery()
         .build()
         .unwrap();
-    let handle = queue.handle();
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
     let id = TaskId::new("s");
     assert!(handle.status(&id).is_none());
-    let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap());
+    let (monitor, stop) = spawn(monitor);
     let _ = handle.push(task("s", 1)).await.unwrap();
     assert!(until(SEC, || handle.status(&id).is_some()).await);
     sleep(SEC).await;
@@ -376,8 +380,8 @@ async fn duplicate_from_a_poll_is_acked_and_not_run() {
         .no_recovery()
         .build()
         .unwrap();
-    let handle = queue.handle();
-    let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap());
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
+    let (monitor, stop) = spawn(monitor);
     let id = TaskId::new("d");
     let _ = handle.push(task("d", 1)).await.unwrap();
     assert!(until(SEC, || runs(&runs_seen) == 1).await);
@@ -393,10 +397,9 @@ async fn duplicate_from_a_poll_is_acked_and_not_run() {
     monitor.await.unwrap();
 }
 
-/// A source of JSON bytes, with or without push support.
+/// A log-like source of JSON bytes that takes pushes.
 #[derive(Default)]
 struct BytesSource {
-    push: bool,
     stored: Mutex<Vec<Vec<u8>>>,
 }
 
@@ -406,8 +409,7 @@ impl Source for BytesSource {
     type Error = Infallible;
 
     fn capabilities(&self) -> Capabilities {
-        let caps = Capabilities::new(AckPointSupport::QueueOnly);
-        if self.push { caps.with_push() } else { caps }
+        Capabilities::new(AckPointSupport::QueueOnly)
     }
 
     async fn poll(&self) -> Result<Polled<Vec<u8>, ()>, Infallible> {
@@ -417,7 +419,9 @@ impl Source for BytesSource {
     async fn ack(&self, (): ()) -> Result<(), Infallible> {
         Ok(())
     }
+}
 
+impl PushSource for BytesSource {
     async fn push(
         &self,
         _: &TaskId,
@@ -426,13 +430,17 @@ impl Source for BytesSource {
         self.stored.lock().unwrap().push(message);
         Ok(PushResult::Stored)
     }
+
+    async fn remove(&self, _id: &TaskId) -> Result<Withdrawal, Infallible> {
+        Ok(Withdrawal::NotFound)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct Recipient(String);
 
-fn bytes_queue(source: &Arc<BytesSource>) -> Queue<BytesSource, JsonCodec, impl Clone + Send, u32> {
-    Queue::builder(
+fn bytes_handle(source: &Arc<BytesSource>) -> QueueHandle<u32> {
+    let queue = Queue::builder(
         "bytes",
         Arc::clone(source),
         JsonCodec::new(MetadataRegistry::new()),
@@ -440,18 +448,16 @@ fn bytes_queue(source: &Arc<BytesSource>) -> Queue<BytesSource, JsonCodec, impl 
     )
     .no_recovery()
     .build()
-    .unwrap()
+    .unwrap();
+    Monitor::new().register(queue).unwrap().1
 }
 
 /// Criterion 28: metadata of an unregistered type fails the push and stores
 /// nothing.
 #[tokio::test]
 async fn unregistered_metadata_fails_the_push() {
-    let source = Arc::new(BytesSource {
-        push: true,
-        ..BytesSource::default()
-    });
-    let handle = bytes_queue(&source).handle();
+    let source = Arc::new(BytesSource::default());
+    let handle = bytes_handle(&source);
     let pushed = handle
         .push(Task::new(1).with_meta(Recipient("r".into())))
         .await;
@@ -464,22 +470,13 @@ async fn unregistered_metadata_fails_the_push() {
     assert_eq!(source.stored.lock().unwrap().len(), 1);
 }
 
-/// Criterion 42: a source without push support, a task overriding the ack
-/// point of a log source, and a push after shutdown.
+/// Criterion 42: a task overriding the ack point of a log source, and a
+/// push after shutdown. A source without push support has a handle without
+/// `push` (a `compile_fail` test of `ConsumerHandle`).
 #[tokio::test(start_paused = true)]
 async fn push_errors() {
     let source = Arc::new(BytesSource::default());
-    let handle = bytes_queue(&source).handle();
-    assert!(matches!(
-        handle.push(Task::new(1)).await,
-        Err(PushTaskError::Unsupported)
-    ));
-
-    let source = Arc::new(BytesSource {
-        push: true,
-        ..BytesSource::default()
-    });
-    let handle = bytes_queue(&source).handle();
+    let handle = bytes_handle(&source);
     let overriding = Task::new(1).with_ack_point(AckPoint::OnCompletion);
     assert!(matches!(
         handle.push(overriding).await,
@@ -496,8 +493,8 @@ async fn push_errors() {
     .no_recovery()
     .build()
     .unwrap();
-    let handle = queue.handle();
-    let (monitor, stop) = spawn(Monitor::new().register(queue).unwrap());
+    let (monitor, handle) = Monitor::new().register(queue).unwrap();
+    let (monitor, stop) = spawn(monitor);
     stop.cancel();
     monitor.await.unwrap();
     let pushed = handle.push(Task::new(1)).await;

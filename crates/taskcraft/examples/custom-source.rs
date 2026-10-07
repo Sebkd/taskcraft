@@ -3,7 +3,10 @@
 //! (spec 2.3.1, 2.5 "Source").
 //!
 //! The source is an outbox table kept in memory: rows are written by the
-//! application, handed out by polls and marked done by acks.
+//! application, handed out by polls and marked done by acks. Tasks are not
+//! pushed through the queue, so the queue consumes the source
+//! (`Queue::consumer`); a source that takes pushes implements `PushSource`
+//! as well and is built with `Queue::builder`.
 //!
 //! ```text
 //! cargo run -p taskcraft --example custom-source
@@ -13,10 +16,11 @@ use std::collections::{BTreeMap, VecDeque};
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use taskcraft::{
-    AckPoint, AckPointSupport, CancellationToken, Capabilities, CloseReason, IdentityCodec,
-    Monitor, Polled, Queue, Source, StopReason, Task, WakeHandle, WakeSignal, task_fn,
+use taskcraft::codec::IdentityCodec;
+use taskcraft::source::{
+    AckPointSupport, Capabilities, CloseReason, Polled, Source, WakeHandle, WakeSignal,
 };
+use taskcraft::{AckPoint, CancellationToken, Monitor, Queue, StopReason, Task, task_fn};
 
 /// Rows waiting, rows handed out, and whether the outbox is closed.
 #[derive(Default)]
@@ -101,7 +105,7 @@ async fn deliver(text: String) {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let outbox = Arc::new(Outbox::default());
-    let queue = Queue::builder(
+    let queue = Queue::consumer(
         "outbox",
         Arc::clone(&outbox),
         IdentityCodec::new(),
@@ -109,11 +113,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .ack_point(AckPoint::OnCompletion)
     .build()?;
-    let running = tokio::spawn(
-        Monitor::new()
-            .register(queue)?
-            .run(CancellationToken::new()),
-    );
+    // A consumed source takes no pushes: its handle only asks and cancels.
+    let (monitor, _outbox_handle) = Monitor::new().register(queue)?;
+    let running = tokio::spawn(monitor.run(CancellationToken::new()));
 
     for text in ["order 1 paid", "order 2 shipped"] {
         outbox.write(text);

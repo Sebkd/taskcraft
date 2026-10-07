@@ -45,7 +45,8 @@ pub trait Runnable: Send + 'static {
 /// A handler's answer: run this process and take its outcome.
 ///
 /// ```
-/// use taskcraft::{CancellationToken, Outcome, Run, Runnable, task_fn};
+/// use taskcraft::runnable::{Run, Runnable};
+/// use taskcraft::{CancellationToken, Outcome, task_fn};
 ///
 /// struct Export {
 ///     rows: u32,

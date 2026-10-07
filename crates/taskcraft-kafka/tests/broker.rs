@@ -19,9 +19,10 @@ use rdkafka::message::{Header, OwnedHeaders};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::{ClientConfig, Offset, TopicPartitionList};
 use serde::{Deserialize, Serialize};
+use taskcraft::source::{Polled, Source};
 use taskcraft::{
-    AckPoint, CancellationToken, Meta, MetadataRegistry, Monitor, Polled, Queue, ShutdownReport,
-    Source, TaskId, task_fn,
+    AckPoint, CancellationToken, Meta, MetadataRegistry, Monitor, Queue, ShutdownReport, TaskId,
+    task_fn,
 };
 use taskcraft_kafka::{KafkaJsonCodec, KafkaSource, KafkaSourceError};
 use tokio::task::JoinHandle;
@@ -159,7 +160,7 @@ fn spawn(
             record.lock().unwrap().push((id.as_str().to_owned(), n));
         }
     });
-    let queue = Queue::builder(
+    let queue = Queue::consumer(
         "jobs",
         Arc::new(source),
         KafkaJsonCodec::new(registry()),
@@ -171,7 +172,7 @@ fn spawn(
     .build()
     .unwrap();
     let stop = CancellationToken::new();
-    let monitor = Monitor::new().register(queue).unwrap();
+    let monitor = Monitor::new().register(queue).unwrap().0;
     let run = tokio::spawn({
         let stop = stop.clone();
         async move { monitor.run(stop).await.unwrap() }

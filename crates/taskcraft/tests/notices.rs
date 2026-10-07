@@ -8,10 +8,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use taskcraft::{
-    AckPointSupport, CancellationToken, Capabilities, Event, IdentityCodec, Monitor, Notice,
-    Notices, Observer, Polled, Queue, Source, Task, task_fn,
-};
+use taskcraft::codec::IdentityCodec;
+use taskcraft::observe::{Event, Observer};
+use taskcraft::source::{AckPointSupport, Capabilities, Notice, Notices, Polled, Source};
+use taskcraft::{CancellationToken, Monitor, Queue, Task, task_fn};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::sleep;
 
@@ -73,7 +73,7 @@ async fn source_error_notice_is_counted_without_a_restart() {
         notices: Mutex::new(Some(notices)),
         polls: AtomicU32::new(0),
     });
-    let queue = Queue::builder(
+    let queue = Queue::consumer(
         "q",
         Arc::clone(&source),
         IdentityCodec::new(),
@@ -86,7 +86,8 @@ async fn source_error_notice_is_counted_without_a_restart() {
     let monitor = Monitor::new()
         .observer(Arc::clone(&counts))
         .register(queue)
-        .unwrap();
+        .unwrap()
+        .0;
     let stop = CancellationToken::new();
     let running = tokio::spawn(monitor.run(stop.clone()));
     sleep(Duration::from_secs(1)).await;

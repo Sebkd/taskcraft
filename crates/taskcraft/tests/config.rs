@@ -10,13 +10,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use taskcraft::codec::IdentityCodec;
+use taskcraft::error::ConfigError;
+use taskcraft::handler::TaskFn;
+use taskcraft::source::Pushed;
 use taskcraft::{
-    AckPoint, ConfigError, IdentityCodec, InMemorySource, MetadataRegistry, Monitor, PollStrategy,
-    Queue, QueueBuilder, RetryPolicy, TRACE_PARENT, TaskFn, task_fn,
+    AckPoint, InMemorySource, MetadataRegistry, Monitor, PollStrategy, Queue, QueueBuilder,
+    RetryPolicy, TRACE_PARENT, task_fn,
 };
 
 type Builder = QueueBuilder<
-    InMemorySource<u32>,
+    Pushed<InMemorySource<u32>>,
     IdentityCodec<u32>,
     TaskFn<fn(u32) -> std::future::Ready<()>, u32, ()>,
     u32,
@@ -62,6 +66,7 @@ fn every_rule_of_2_10() {
                 Monitor::new()
                     .register(queue("q").build().unwrap())
                     .unwrap()
+                    .0
                     .register(queue("q").build().unwrap()),
             ),
         ),

@@ -8,9 +8,9 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::codec::{Codec, CodecError};
+use crate::backend::Backend;
+use crate::codec::{Codec, CodecError, JsonCodec};
 use crate::error::ConfigError;
-use crate::handle::QueueHandle;
 use crate::handler::{BoxFuture, SharedData};
 use crate::metadata::MetadataRegistry;
 use crate::observe::ObserverCell;
@@ -18,7 +18,9 @@ use crate::outcome::BoxError;
 use crate::poll::PollStrategy;
 use crate::registry::TaskRegistry;
 use crate::retry::RetryPolicy;
-use crate::source::{AckPointSupport, Source};
+use crate::source::{
+    AckPointSupport, Consumed, PushSource, Pushed, Source, StoreMessage, Stored, TaskStore,
+};
 use crate::task::{AckPoint, Task};
 
 /// What the dead-letter hook receives: a message that could not be decoded.
@@ -99,16 +101,20 @@ pub(crate) struct QueueConfig {
 }
 
 /// A queue: where tasks come from, how they are decoded, what runs them, and
-/// how. Build it with [`Queue::builder`] and register it with a
-/// [`Monitor`](crate::Monitor).
-pub struct Queue<S: Source, C, Svc, Args> {
+/// how. Build it with [`Queue::builder`], [`Queue::consumer`] or
+/// [`Queue::on_store`] and register it with a [`Monitor`](crate::Monitor),
+/// which returns its handle.
+///
+/// `B` is the kind of source the queue was built on: [`Pushed`],
+/// [`Consumed`] or [`Stored`].
+pub struct Queue<B: Backend, C, Svc, Args> {
     pub(crate) config: QueueConfig,
-    pub(crate) source: Arc<S>,
+    pub(crate) source: Arc<B>,
     pub(crate) codec: Arc<C>,
     pub(crate) service: Svc,
     pub(crate) registry: Arc<MetadataRegistry>,
     pub(crate) shared: Arc<SharedData>,
-    pub(crate) dead_letter: Option<DeadLetterHook<S::Message>>,
+    pub(crate) dead_letter: Option<DeadLetterHook<B::Message>>,
     pub(crate) overflow: OverflowPolicy<Args>,
     pub(crate) tasks: Arc<TaskRegistry>,
     pub(crate) recovery: Option<RecoveryFn<Args>>,
@@ -116,67 +122,81 @@ pub struct Queue<S: Source, C, Svc, Args> {
     pub(crate) _args: PhantomData<fn() -> Args>,
 }
 
-impl<S: Source, C: Codec<Args, S::Message>, Svc, Args> Queue<S, C, Svc, Args> {
-    /// Starts building a queue named `name` that takes tasks from `source`,
-    /// decodes them with `codec` and runs them with `service` (usually built
-    /// with [`task_fn`](crate::task_fn)).
+impl<S: PushSource, C: Codec<Args, S::Message>, Svc, Args> Queue<Pushed<S>, C, Svc, Args> {
+    /// Starts building a queue named `name` on a source that tasks are
+    /// pushed into, such as the [`InMemorySource`](crate::InMemorySource):
+    /// it decodes them with `codec` and runs them with `service` (usually
+    /// built with [`task_fn`](crate::task_fn)). Its handle pushes.
     pub fn builder(
         name: impl Into<String>,
         source: Arc<S>,
         codec: C,
         service: Svc,
-    ) -> QueueBuilder<S, C, Svc, Args> {
-        QueueBuilder {
-            queue: Self {
-                config: QueueConfig {
-                    name: name.into(),
-                    concurrency: 1,
-                    pools: BTreeMap::new(),
-                    ack_point: AckPoint::OnAccept,
-                    poll: PollStrategy::default(),
-                    cancel_grace: Duration::from_secs(30),
-                    retry: RetryPolicy::default(),
-                    attempt_timeout: None,
-                    timeout_outcome: TimeoutOutcome::Abort,
-                },
-                source,
-                codec: Arc::new(codec),
-                service,
-                registry: Arc::new(MetadataRegistry::new()),
-                shared: Arc::new(SharedData::new()),
-                dead_letter: None,
-                overflow: OverflowPolicy::Wait { limit: None },
-                tasks: Arc::new(TaskRegistry::new()),
-                recovery: None,
-                observers: ObserverCell::default(),
-                _args: PhantomData,
-            },
-        }
+    ) -> QueueBuilder<Pushed<S>, C, Svc, Args> {
+        QueueBuilder::new(name.into(), Pushed(source), codec, service, None)
     }
 }
 
-impl<S: Source, C, Svc, Args> Queue<S, C, Svc, Args> {
+impl<S: Source, C: Codec<Args, S::Message>, Svc, Args> Queue<Consumed<S>, C, Svc, Args> {
+    /// Starts building a queue named `name` that consumes a stream, such as
+    /// a Kafka topic. Its handle asks about tasks and cancels them, but does
+    /// not push: tasks come from the stream.
+    pub fn consumer(
+        name: impl Into<String>,
+        source: Arc<S>,
+        codec: C,
+        service: Svc,
+    ) -> QueueBuilder<Consumed<S>, C, Svc, Args> {
+        QueueBuilder::new(name.into(), Consumed(source), codec, service, None)
+    }
+}
+
+impl<S: TaskStore, Svc, Args> Queue<Stored<S>, JsonCodec, Svc, Args>
+where
+    JsonCodec: Codec<Args, StoreMessage>,
+{
+    /// Starts building a queue named `name` on a durable task store, such as
+    /// the PostgreSQL store. Tasks are stored as JSON; the codec is built in
+    /// and names metadata through the queue's
+    /// [metadata registry](QueueBuilder::metadata_registry). Its handle
+    /// pushes.
+    ///
+    /// A store is neither a stream nor a plain push source, so it cannot be
+    /// given another codec:
+    ///
+    /// ```compile_fail,E0277
+    /// # use std::sync::Arc;
+    /// # fn f<S: taskcraft::source::TaskStore>(store: Arc<S>) {
+    /// let _ = taskcraft::Queue::builder("q", store, taskcraft::codec::JsonCodec::new(Default::default()), taskcraft::task_fn(|_: u32| async {}));
+    /// # }
+    /// ```
+    ///
+    /// ```compile_fail,E0277
+    /// # use std::sync::Arc;
+    /// # fn f<S: taskcraft::source::TaskStore>(store: Arc<S>) {
+    /// let _ = taskcraft::Queue::consumer("q", store, taskcraft::codec::JsonCodec::new(Default::default()), taskcraft::task_fn(|_: u32| async {}));
+    /// # }
+    /// ```
+    pub fn on_store(
+        name: impl Into<String>,
+        store: Arc<S>,
+        service: Svc,
+    ) -> QueueBuilder<Stored<S>, JsonCodec, Svc, Args> {
+        let codec = JsonCodec::new(MetadataRegistry::new());
+        let bind: fn(&MetadataRegistry) -> JsonCodec = |registry| JsonCodec::new(registry.clone());
+        QueueBuilder::new(name.into(), Stored(store), codec, service, Some(bind))
+    }
+}
+
+impl<B: Backend, C, Svc, Args> Queue<B, C, Svc, Args> {
     /// The queue name.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.config.name
     }
-
-    /// A handle for pushing tasks and asking about them by id. Take it before
-    /// registering the queue with a monitor.
-    #[must_use]
-    pub fn handle(&self) -> QueueHandle<S, C, Args> {
-        QueueHandle::new(
-            &self.config.name,
-            Arc::clone(&self.source),
-            Arc::clone(&self.codec),
-            Arc::clone(&self.tasks),
-            Arc::clone(&self.observers),
-        )
-    }
 }
 
-impl<S: Source, C, Svc, Args> fmt::Debug for Queue<S, C, Svc, Args> {
+impl<B: Backend, C, Svc, Args> fmt::Debug for Queue<B, C, Svc, Args> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Queue")
             .field("config", &self.config)
@@ -189,11 +209,50 @@ impl<S: Source, C, Svc, Args> fmt::Debug for Queue<S, C, Svc, Args> {
 
 /// Builds a [`Queue`]; settings are checked by [`build`](Self::build).
 #[must_use]
-pub struct QueueBuilder<S: Source, C, Svc, Args> {
-    queue: Queue<S, C, Svc, Args>,
+pub struct QueueBuilder<B: Backend, C, Svc, Args> {
+    queue: Queue<B, C, Svc, Args>,
+    /// Builds the codec from the queue's metadata registry: the built-in
+    /// codec of a task store.
+    bind_codec: Option<fn(&MetadataRegistry) -> C>,
 }
 
-impl<S: Source, C, Svc, Args> QueueBuilder<S, C, Svc, Args> {
+impl<B: Backend, C, Svc, Args> QueueBuilder<B, C, Svc, Args> {
+    fn new(
+        name: String,
+        source: B,
+        codec: C,
+        service: Svc,
+        bind_codec: Option<fn(&MetadataRegistry) -> C>,
+    ) -> Self {
+        Self {
+            queue: Queue {
+                config: QueueConfig {
+                    name,
+                    concurrency: 1,
+                    pools: BTreeMap::new(),
+                    ack_point: AckPoint::OnAccept,
+                    poll: PollStrategy::default(),
+                    cancel_grace: Duration::from_secs(30),
+                    retry: RetryPolicy::default(),
+                    attempt_timeout: None,
+                    timeout_outcome: TimeoutOutcome::Abort,
+                },
+                source: Arc::new(source),
+                codec: Arc::new(codec),
+                service,
+                registry: Arc::new(MetadataRegistry::new()),
+                shared: Arc::new(SharedData::new()),
+                dead_letter: None,
+                overflow: OverflowPolicy::Wait { limit: None },
+                tasks: Arc::new(TaskRegistry::new()),
+                recovery: None,
+                observers: ObserverCell::default(),
+                _args: PhantomData,
+            },
+            bind_codec,
+        }
+    }
+
     /// How many tasks run at once. Default 1.
     pub fn concurrency(mut self, limit: usize) -> Self {
         self.queue.config.concurrency = limit;
@@ -317,8 +376,8 @@ impl<S: Source, C, Svc, Args> QueueBuilder<S, C, Svc, Args> {
     /// acknowledged. Without a hook such messages are logged and acknowledged.
     pub fn dead_letter<F>(mut self, hook: F) -> Self
     where
-        S::Message: Clone,
-        F: Fn(DeadLetter<S::Message>) + Send + Sync + 'static,
+        B::Message: Clone,
+        F: Fn(DeadLetter<B::Message>) + Send + Sync + 'static,
     {
         self.queue.dead_letter = Some(DeadLetterHook {
             hook: Arc::new(hook),
@@ -335,7 +394,10 @@ impl<S: Source, C, Svc, Args> QueueBuilder<S, C, Svc, Args> {
     /// invalid poll strategy or retry policy, a zero cancel grace or attempt
     /// timeout, or ack on accept without a recovery hook on a source that is
     /// not a task store.
-    pub fn build(self) -> Result<Queue<S, C, Svc, Args>, ConfigError> {
+    pub fn build(mut self) -> Result<Queue<B, C, Svc, Args>, ConfigError> {
+        if let Some(bind) = self.bind_codec {
+            self.queue.codec = Arc::new(bind(&self.queue.registry));
+        }
         let config = &self.queue.config;
         if config.name.is_empty() {
             return Err(ConfigError::EmptyQueueName);
@@ -358,7 +420,7 @@ impl<S: Source, C, Svc, Args> QueueBuilder<S, C, Svc, Args> {
     }
 }
 
-impl<S: Source, C, Svc, Args> fmt::Debug for QueueBuilder<S, C, Svc, Args> {
+impl<B: Backend, C, Svc, Args> fmt::Debug for QueueBuilder<B, C, Svc, Args> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("QueueBuilder")
             .field("queue", &self.queue)

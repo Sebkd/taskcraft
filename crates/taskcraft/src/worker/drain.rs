@@ -12,17 +12,17 @@ use tracing::{error, info, warn};
 use super::TaskEnd;
 use super::execute::log_outcome;
 use super::intake::Intake;
+use crate::backend::Backend;
 use crate::monitor::{QueueReport, StopReason};
 use crate::observe::{Event, Observers};
 use crate::registry::TaskRegistry;
-use crate::source::Source;
 use crate::state::TaskState;
 use crate::status::FinishReason;
 use crate::task::TaskId;
 
 /// Intake ended: refuse pushes, drain the running tasks, report the ack
 /// failures left and how the worker stopped.
-pub(super) async fn stop_worker<S: Source, C, Svc, Args>(
+pub(super) async fn stop_worker<S: Backend, C, Svc, Args>(
     intake: Intake<S, C, Svc, Args>,
     reason: StopReason,
     listener: Option<JoinHandle<()>>,

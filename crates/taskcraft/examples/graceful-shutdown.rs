@@ -11,9 +11,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use taskcraft::{
-    Cancel, CancellationToken, IdentityCodec, InMemorySource, Monitor, Queue, Task, task_fn,
-};
+use taskcraft::codec::IdentityCodec;
+use taskcraft::{Cancel, CancellationToken, InMemorySource, Monitor, Queue, Task, task_fn};
 use tokio::time::{Instant, sleep};
 
 /// Three kinds of task: one finishes within the shutdown timeout, one
@@ -44,8 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .cancel_grace(Duration::from_secs(2))
     .no_recovery()
     .build()?;
-    let handle = queue.handle();
-    let monitor = Monitor::new()
+    let (monitor, handle) = Monitor::new()
         .shutdown_timeout(Duration::from_secs(5))
         .register(queue)?;
     let stop = CancellationToken::new();

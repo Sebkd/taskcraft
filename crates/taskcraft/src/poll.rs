@@ -230,6 +230,7 @@ mod tests {
 
     use super::*;
     use crate::memory::InMemorySource;
+    use crate::source::PushSource;
     use crate::source::Source;
     use crate::task::{Task, TaskId};
 

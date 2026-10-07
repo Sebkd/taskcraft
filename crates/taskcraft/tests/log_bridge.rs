@@ -7,7 +7,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use taskcraft::{CancellationToken, IdentityCodec, InMemorySource, Monitor, Queue, task_fn};
+use taskcraft::codec::IdentityCodec;
+use taskcraft::{CancellationToken, InMemorySource, Monitor, Queue, task_fn};
 
 #[derive(Clone, Default)]
 struct Records(Arc<Mutex<Vec<(String, String)>>>);
@@ -42,7 +43,7 @@ async fn events_arrive_as_log_records() {
     .build()
     .unwrap();
     let stop = CancellationToken::new();
-    let monitor = Monitor::new().register(queue).unwrap();
+    let monitor = Monitor::new().register(queue).unwrap().0;
     let running = tokio::spawn(monitor.run(stop.clone()));
     for _ in 0..100 {
         tokio::task::yield_now().await;

@@ -12,9 +12,10 @@ use rdkafka::consumer::{
 use rdkafka::error::{KafkaError, KafkaResult, RDKafkaErrorCode};
 use rdkafka::message::{Headers, Message};
 use rdkafka::{ClientConfig, ClientContext, Offset, TopicPartitionList};
-use taskcraft::{
-    AckPointSupport, Capabilities, ConfigError, Notice, Notices, Polled, Source, TaskId,
-    WakeHandle, WakeSignal,
+use taskcraft::TaskId;
+use taskcraft::error::ConfigError;
+use taskcraft::source::{
+    AckPointSupport, Capabilities, Notice, Notices, Polled, Source, WakeHandle, WakeSignal,
 };
 use tokio::sync::mpsc;
 use tracing::warn;
@@ -452,7 +453,7 @@ mod tests {
             .unwrap();
         let caps = source.capabilities();
         assert_eq!(caps.ack_point_support(), AckPointSupport::QueueOnly);
-        assert!(!caps.accepts_push() && !caps.supports_defer());
+        assert!(!caps.supports_defer());
         assert_eq!(source.topic(), "jobs");
     }
 }

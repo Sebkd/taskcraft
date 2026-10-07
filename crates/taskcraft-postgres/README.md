@@ -9,14 +9,14 @@ restarts, and with leases hand a crashed process's tasks to another one.
 
 ```toml
 [dependencies]
-taskcraft = "0.1"
-taskcraft-postgres = "0.1"
+taskcraft = "0.2"
+taskcraft-postgres = "0.2"
 ```
 
 ```rust,no_run
 use std::sync::Arc;
 use std::time::Duration;
-use taskcraft::{BoxError, CancelOutcome, CancellationToken, JsonCodec, MetadataRegistry, Monitor, PushOutcome, Queue, Task, TaskId, task_fn};
+use taskcraft::{BoxError, CancelOutcome, CancellationToken, Monitor, PushOutcome, Queue, Task, TaskId, task_fn};
 use taskcraft_postgres::{Lease, PgStore};
 
 async fn transfer(amount: u64) {}
@@ -28,11 +28,12 @@ async fn main() -> Result<(), BoxError> {
         .retention(Duration::from_secs(7 * 24 * 3600)) // how long finished tasks are kept
         .connect("postgres://app:secret@db:5432/app")
         .await?;
-    let queue = Queue::builder("transfers", Arc::new(store.queue("transfers")), JsonCodec::new(MetadataRegistry::new()), task_fn(transfer))
+    // The store keeps tasks as JSON: the codec is built in.
+    let queue = Queue::on_store("transfers", Arc::new(store.queue("transfers")), task_fn(transfer))
         .concurrency(4)
         .build()?;
-    let transfers = queue.handle();
-    let running = tokio::spawn(Monitor::new().register(queue)?.run(CancellationToken::new()));
+    let (monitor, transfers) = Monitor::new().register(queue)?;
+    let running = tokio::spawn(monitor.run(CancellationToken::new()));
 
     match transfers.push(Task::new(100).with_id("transfer-42")).await? {
         PushOutcome::AlreadyFinished { state, .. } => println!("done before: {state}"),
@@ -66,7 +67,8 @@ async fn store(pool: sqlx::PgPool) -> Result<PgStore, PgStoreError> {
 ## How it works
 
 - **Tables.** `taskcraft_tasks` and `taskcraft_processes`, created on start.
-  Tasks are stored as the JSON envelope of `JsonCodec`.
+  Tasks are stored as the JSON envelope of `JsonCodec`, the built-in codec
+  of `Queue::on_store`; it names metadata through the queue's registry.
 - **Claim on poll.** One statement with `FOR UPDATE SKIP LOCKED` takes the
   next due task for this process: no task reaches two processes. Every later
   write checks that this process still owns the task.

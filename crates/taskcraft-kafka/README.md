@@ -8,8 +8,8 @@ reads one topic as a member of a consumer group.
 
 ```toml
 [dependencies]
-taskcraft = "0.1"
-taskcraft-kafka = "0.1"
+taskcraft = "0.2"
+taskcraft-kafka = "0.2"
 ```
 
 ```rust,no_run
@@ -33,12 +33,14 @@ async fn main() -> Result<(), BoxError> {
     let source = KafkaSource::builder("localhost:9092", "exports", "exporters")
         .property("client.id", "exporter-1") // any librdkafka setting
         .build()?;
-    let queue = Queue::builder("exports", Arc::new(source), KafkaJsonCodec::new(registry.clone()), task_fn(export))
+    // The queue consumes the topic: producers write to it, the handle does not push.
+    let queue = Queue::consumer("exports", Arc::new(source), KafkaJsonCodec::new(registry.clone()), task_fn(export))
         .metadata_registry(registry)
         .ack_point(AckPoint::OnCompletion)
         .concurrency(8)
         .build()?;
-    Monitor::new().register(queue)?.run(CancellationToken::new()).await?;
+    let (monitor, _exports) = Monitor::new().register(queue)?;
+    monitor.run(CancellationToken::new()).await?;
     Ok(())
 }
 ```

@@ -15,7 +15,7 @@ categories = ["asynchronous", "concurrency"]
 rdkafka = { version = "0.39", default-features = false, features = ["libz", "tokio"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-taskcraft = { path = "../taskcraft", version = "0.1.1" }
+taskcraft = { path = "../taskcraft", version = "0.2.0" }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time"] }
 tracing = { workspace = true }

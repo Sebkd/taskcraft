@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 /// acknowledged holds back the commit of every later task of its partition.
 ///
 /// ```
-/// use taskcraft::OffsetTracker;
+/// use taskcraft::source::OffsetTracker;
 ///
 /// let mut partition = OffsetTracker::new();
 /// for offset in 1..=3 {
