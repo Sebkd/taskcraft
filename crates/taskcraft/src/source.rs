@@ -16,6 +16,7 @@
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
@@ -255,6 +256,9 @@ impl Notices {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum PushError<E> {
+    /// The source cannot hold a task back until a moment of delivery.
+    #[error("source does not support delayed push")]
+    DelayUnsupported,
     /// The source is closed.
     #[error("source is closed")]
     Closed,
@@ -406,6 +410,19 @@ pub trait PushSource: Source {
     /// deferred — and frees its id.
     fn remove(&self, id: &TaskId) -> impl Future<Output = Result<Withdrawal, Self::Error>> + Send;
 
+    /// Stores a pushed task, checking its id, to be handed out not before
+    /// `at` (spec 2.1.2.1). A source with delayed delivery declares
+    /// [`Capabilities::with_defer`]; the default does not support it.
+    fn push_at(
+        &self,
+        id: &TaskId,
+        message: Self::Message,
+        at: SystemTime,
+    ) -> impl Future<Output = Result<PushResult, PushError<Self::Error>>> + Send {
+        let _ = (id, message, at);
+        async { Err(PushError::DelayUnsupported) }
+    }
+
     /// Takes a delivered task back, to be handed out again at `at`. Declare
     /// it with [`Capabilities::with_defer`]; the default does not support it.
     fn defer(
@@ -446,6 +463,18 @@ pub trait TaskStore: Send + Sync + 'static {
         id: &TaskId,
         message: StoreMessage,
     ) -> impl Future<Output = Result<PushResult, PushError<Self::Error>>> + Send;
+
+    /// Stores a pushed task to be handed out not before `at` (spec
+    /// 2.1.2.1). The default does not support it.
+    fn push_at(
+        &self,
+        id: &TaskId,
+        message: StoreMessage,
+        at: SystemTime,
+    ) -> impl Future<Output = Result<PushResult, PushError<Self::Error>>> + Send {
+        let _ = (id, message, at);
+        async { Err(PushError::DelayUnsupported) }
+    }
 
     /// Takes back a task that is stored but not handed out yet, or records
     /// a request to cancel a task another process holds.

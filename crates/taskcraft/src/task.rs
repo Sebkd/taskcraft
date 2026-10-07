@@ -1,7 +1,7 @@
 //! The task: one unit of work (spec 2.7.1).
 
 use std::fmt;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
@@ -106,6 +106,7 @@ pub struct Task<Args> {
     retries: u32,
     ack_point: Option<AckPoint>,
     accepted_at: Option<SystemTime>,
+    deliver_at: Option<SystemTime>,
 }
 
 /// Every field of a [`Task`], for codecs and sources that store tasks and
@@ -149,10 +150,13 @@ impl<Args> Task<Args> {
             retries,
             ack_point,
             accepted_at,
+            deliver_at: None,
         }
     }
 
-    /// Splits the task into all of its fields.
+    /// Splits the task into all of its fields. The delivery moment is not
+    /// one of them: it matters only to the push (see
+    /// [`with_deliver_at`](Self::with_deliver_at)).
     pub fn into_parts(self) -> TaskParts<Args> {
         TaskParts {
             id: self.id,
@@ -175,6 +179,7 @@ impl<Args> Task<Args> {
             retries: 0,
             ack_point: None,
             accepted_at: None,
+            deliver_at: None,
         }
     }
 
@@ -201,6 +206,36 @@ impl<Args> Task<Args> {
     pub fn with_ack_point(mut self, ack_point: AckPoint) -> Self {
         self.ack_point = Some(ack_point);
         self
+    }
+
+    /// Delivers the task not before `at` (spec 2.1.2.1): the source keeps
+    /// it and a poll hands it out once the moment has come. A moment that has
+    /// passed is an ordinary push.
+    ///
+    /// The source must support delayed delivery — the in-memory source and
+    /// the task store do; otherwise the push fails with
+    /// [`PushTaskError::DelayUnsupported`](crate::error::PushTaskError::DelayUnsupported).
+    /// The task runs on the first poll after the moment, so it may start as
+    /// late as the queue's poll strategy sleeps. Tasks returned by a
+    /// recovery hook are not pushed and run at once.
+    #[must_use]
+    pub fn with_deliver_at(mut self, at: SystemTime) -> Self {
+        self.deliver_at = Some(at);
+        self
+    }
+
+    /// Delivers the task not before `delay` from now; see
+    /// [`with_deliver_at`](Self::with_deliver_at).
+    #[must_use]
+    pub fn with_delay(self, delay: Duration) -> Self {
+        let at = SystemTime::now() + delay;
+        self.with_deliver_at(at)
+    }
+
+    /// When the task is to be delivered, if not at once.
+    #[must_use]
+    pub fn deliver_at(&self) -> Option<SystemTime> {
+        self.deliver_at
     }
 
     /// The task id.

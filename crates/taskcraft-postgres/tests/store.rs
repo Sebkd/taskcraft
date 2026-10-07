@@ -6,7 +6,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use taskcraft::source::{Notice, Polled, StoreMessage, TaskStore};
 use taskcraft::{
@@ -424,4 +424,48 @@ async fn cancel_reaches_the_owning_process() {
     assert_eq!(status.reason(), Some(&FinishReason::CancelledByUser));
     stop.cancel();
     running.await.unwrap();
+}
+
+/// Change delayed-push, criteria 2 and 4: a delayed task is queued with its
+/// next delivery, any process takes it only after the moment.
+#[tokio::test(flavor = "multi_thread")]
+async fn delayed_push_waits_for_its_moment() {
+    let Some(url) = url() else { return };
+    let name = unique("q");
+    let (a, b) = (
+        store(&url, &unique("a"), false).await,
+        store(&url, &unique("b"), false).await,
+    );
+    // Process A only pushes; process B polls.
+    let (_monitor, handle) = queue(&name, a.queue(&name), &Arc::default());
+    let other = b.queue(&name);
+    let at = SystemTime::now() + 2 * SEC;
+    let pushed = handle
+        .push(Task::new(0).with_id("later").with_deliver_at(at))
+        .await
+        .unwrap();
+    assert!(matches!(pushed, PushOutcome::Enqueued { .. }));
+
+    let status = handle
+        .fetch_status(&TaskId::new("later"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.state(), TaskState::Queued);
+    let next = status.next_attempt_at().unwrap();
+    let skew = next.duration_since(at).unwrap_or_else(|e| e.duration());
+    assert!(skew < SEC, "next delivery {next:?}, asked {at:?}");
+
+    assert!(matches!(other.poll().await.unwrap(), Polled::Empty));
+    assert!(
+        until(10 * SEC, async || matches!(
+            other.poll().await.unwrap(),
+            Polled::Task { .. }
+        ))
+        .await
+    );
+    assert!(
+        SystemTime::now() + Duration::from_millis(500) >= at,
+        "taken before its moment"
+    );
 }

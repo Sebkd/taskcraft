@@ -3,6 +3,7 @@
 //! stores answer the same operations. Sealed: the module is private.
 
 use std::future::Future;
+use std::time::SystemTime;
 
 use tokio::time::Instant;
 
@@ -68,6 +69,15 @@ pub trait Backend: Send + Sync + 'static {
         &self,
         id: &TaskId,
         message: Self::Message,
+    ) -> impl Future<Output = Result<PushResult, PushError<Self::Error>>> + Send;
+
+    /// A push to be handed out not before `at`; only through a
+    /// [`QueueHandle`].
+    fn push_at(
+        &self,
+        id: &TaskId,
+        message: Self::Message,
+        at: SystemTime,
     ) -> impl Future<Output = Result<PushResult, PushError<Self::Error>>> + Send;
 }
 
@@ -135,6 +145,15 @@ impl<S: Source> Backend for Consumed<S> {
     }
 
     async fn push(&self, _: &TaskId, _: S::Message) -> Result<PushResult, PushError<S::Error>> {
+        Err(PushError::Closed)
+    }
+
+    async fn push_at(
+        &self,
+        _: &TaskId,
+        _: S::Message,
+        _: SystemTime,
+    ) -> Result<PushResult, PushError<S::Error>> {
         Err(PushError::Closed)
     }
 }
@@ -209,6 +228,15 @@ impl<S: PushSource> Backend for Pushed<S> {
         message: S::Message,
     ) -> impl Future<Output = Result<PushResult, PushError<S::Error>>> + Send {
         self.0.push(id, message)
+    }
+
+    fn push_at(
+        &self,
+        id: &TaskId,
+        message: S::Message,
+        at: SystemTime,
+    ) -> impl Future<Output = Result<PushResult, PushError<S::Error>>> + Send {
+        self.0.push_at(id, message, at)
     }
 }
 
@@ -291,6 +319,15 @@ impl<S: TaskStore> Backend for Stored<S> {
         message: StoreMessage,
     ) -> impl Future<Output = Result<PushResult, PushError<S::Error>>> + Send {
         self.0.push(id, message)
+    }
+
+    fn push_at(
+        &self,
+        id: &TaskId,
+        message: StoreMessage,
+        at: SystemTime,
+    ) -> impl Future<Output = Result<PushResult, PushError<S::Error>>> + Send {
+        self.0.push_at(id, message, at)
     }
 }
 

@@ -1,6 +1,7 @@
 //! E-13 `durable-store` — a task store in PostgreSQL without leases: push,
-//! status of finished tasks, deferred redelivery, and a process restart that
-//! gives its unfinished task back (spec 2.6 "Task store", 2.3.19 p. 1).
+//! delayed push, status of finished tasks, deferred redelivery, and a process
+//! restart that gives its unfinished task back (spec 2.6 "Task store",
+//! 2.1.2.1, 2.3.19 p. 1).
 //!
 //! Needs a database: `docker compose -f examples/docker-compose.yml up -d postgres`.
 //!
@@ -112,6 +113,29 @@ async fn main() -> Result<(), BoxError> {
     if !matches!(again, PushOutcome::AlreadyFinished { .. }) {
         return Err("expected \"already finished\"".into());
     }
+    // A reminder for two seconds from now waits in the store, queued.
+    let _ = handle
+        .push(
+            Task::new("reminder".to_owned())
+                .with_id("reminder")
+                .with_delay(Duration::from_secs(2)),
+        )
+        .await?;
+    let waiting = handle
+        .fetch_status(&TaskId::new("reminder"))
+        .await?
+        .ok_or("no status for reminder")?;
+    println!(
+        "  reminder: {}, next delivery in {:?}",
+        waiting.state(),
+        waiting
+            .next_attempt_at()
+            .and_then(|at| at.duration_since(SystemTime::now()).ok())
+    );
+    if waiting.state() != TaskState::Queued || waiting.next_attempt_at().is_none() {
+        return Err("expected a queued reminder with its next delivery".into());
+    }
+    wait_for(&handle, "reminder", TaskState::Succeeded).await?;
 
     println!("2. the process crashes with a task in hand");
     let _ = handle
