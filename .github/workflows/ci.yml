@@ -208,6 +208,8 @@ jobs:
         with:
           workspaces: fuzz
 
+      # A prebuilt cargo-fuzz is a musl binary and defaults to its own
+      # target, whose std the toolchain lacks: the steps name the target.
       - name: Install cargo-fuzz
         uses: taiki-e/install-action@v2
         with:
@@ -217,21 +219,21 @@ jobs:
       # lines go out as annotations, which are.
       - name: Build the fuzz targets
         working-directory: fuzz
-        run: ../.github/annotate.sh build.log cargo fuzz build
+        run: ../.github/annotate.sh build.log cargo fuzz build --target x86_64-unknown-linux-gnu
 
       # A minute per decoder: no panic, no hang (10 s per input). Longer
       # runs are done by hand before releases.
       - name: Fuzz JsonCodec
         working-directory: fuzz
-        run: ../.github/annotate.sh run.log cargo fuzz run json_decode -- -max_total_time=60 -timeout=10
+        run: ../.github/annotate.sh run.log cargo fuzz run json_decode --target x86_64-unknown-linux-gnu -- -max_total_time=60 -timeout=10
 
       - name: Fuzz KafkaJsonCodec
         working-directory: fuzz
-        run: ../.github/annotate.sh run.log cargo fuzz run kafka_decode -- -max_total_time=60 -timeout=10
+        run: ../.github/annotate.sh run.log cargo fuzz run kafka_decode --target x86_64-unknown-linux-gnu -- -max_total_time=60 -timeout=10
 
       - name: Fuzz metadata
         working-directory: fuzz
-        run: ../.github/annotate.sh run.log cargo fuzz run metadata -- -max_total_time=60 -timeout=10
+        run: ../.github/annotate.sh run.log cargo fuzz run metadata --target x86_64-unknown-linux-gnu -- -max_total_time=60 -timeout=10
 
       # The input that broke a decoder, to replay with `cargo fuzz run <target> <file>`.
       - name: Upload failing inputs
