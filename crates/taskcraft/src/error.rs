@@ -1,7 +1,7 @@
 //! Error types of the task model.
 
 pub use crate::codec::CodecError;
-pub use crate::handle::PushTaskError;
+pub use crate::handle::{PushTaskError, RequeueError};
 use crate::outcome::BoxError;
 use crate::state::TaskState;
 

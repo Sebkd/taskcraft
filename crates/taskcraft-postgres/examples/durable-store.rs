@@ -1,7 +1,7 @@
 //! E-13 `durable-store` — a task store in PostgreSQL without leases: push,
-//! delayed push, status of finished tasks, deferred redelivery, and a process
-//! restart that gives its unfinished task back (spec 2.6 "Task store",
-//! 2.1.2.1, 2.3.19 p. 1).
+//! delayed push, status of finished tasks, deferred redelivery, a failed task
+//! queued again, and a process restart that gives its unfinished task back
+//! (spec 2.6 "Task store", 2.1.2.1, 2.3.26, 2.3.19 p. 1).
 //!
 //! Needs a database: `docker compose -f examples/docker-compose.yml up -d postgres`.
 //!
@@ -27,11 +27,13 @@ type Handle = QueueHandle<String>;
 
 const ALIVE: Duration = Duration::from_millis(500);
 
-/// Invoices: "late" is deferred once, "hang" hangs on its first attempt.
+/// Invoices: "late" is deferred once, "typo" fails its first attempt (the
+/// data is fixed after), "hang" hangs on its first attempt.
 async fn invoice(name: String, Attempt(attempt): Attempt) -> Outcome {
     println!("  {name}: attempt {attempt}");
     match name.as_str() {
         "late" if attempt == 1 => Outcome::defer(Duration::from_secs(2), "the ledger is closing"),
+        "typo" if attempt == 1 => Outcome::abort("unknown customer"),
         "hang" if attempt == 1 => {
             sleep(Duration::from_secs(3600)).await;
             Outcome::Success
@@ -136,6 +138,14 @@ async fn main() -> Result<(), BoxError> {
         return Err("expected a queued reminder with its next delivery".into());
     }
     wait_for(&handle, "reminder", TaskState::Succeeded).await?;
+    // A failed task stays in the store: once its data is fixed, run it again.
+    let _ = handle
+        .push(Task::new("typo".to_owned()).with_id("typo"))
+        .await?;
+    wait_for(&handle, "typo", TaskState::Failed).await?;
+    handle.requeue(&TaskId::new("typo")).await?;
+    wait_for(&handle, "typo", TaskState::Succeeded).await?;
+    println!("  typo: requeued and done");
 
     println!("2. the process crashes with a task in hand");
     let _ = handle

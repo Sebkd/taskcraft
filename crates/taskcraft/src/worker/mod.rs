@@ -108,6 +108,7 @@ where
         dead_letter,
         overflow,
         tasks,
+        failed,
         observers: observer_cell,
         ..
     } = queue;
@@ -168,6 +169,7 @@ where
         slots,
         waiting_room: Arc::new(Semaphore::new(wait_limit)),
         reject,
+        failed,
         running: JoinSet::new(),
         ids: HashMap::new(),
         drain_cancel: CancellationToken::new(),

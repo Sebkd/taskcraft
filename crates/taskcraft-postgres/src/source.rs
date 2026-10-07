@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use taskcraft::source::{
-    Completion, DeferError, Notice, Notices, Polled, Progress, PushError, PushResult, StoreMessage,
-    TaskStore, WakeHandle, WakeSignal, Withdrawal,
+    Completion, DeferError, Notice, Notices, Polled, Progress, PushError, PushResult, Requeue,
+    StoreMessage, TaskStore, WakeHandle, WakeSignal, Withdrawal,
 };
 use taskcraft::{FinishReason, TaskId, TaskState, TaskStatus};
 use tokio::time::Instant;
@@ -345,6 +345,36 @@ impl TaskStore for PgSource {
             Withdrawal::Finished
         } else {
             Withdrawal::NotFound
+        })
+    }
+
+    /// Back to "queued" in one statement, retries reset, attempt kept; the
+    /// state tells "not failed" from "not found" when nothing changed.
+    async fn requeue(&self, id: &TaskId) -> Result<Requeue, PgStoreError> {
+        let requeued = sqlx::query(
+            "UPDATE taskcraft_tasks
+                SET state = 'queued', retries = 0, reason = NULL, owner = NULL,
+                    lease_until = NULL, next_delivery = NULL, updated_at = now()
+              WHERE queue = $1 AND id = $2 AND state IN ('failed', 'panicked')",
+        )
+        .bind(&*self.queue)
+        .bind(id.as_str())
+        .execute(&self.shared.pool)
+        .await?
+        .rows_affected();
+        if requeued == 1 {
+            self.wake.wake();
+            return Ok(Requeue::Requeued);
+        }
+        let state: Option<String> =
+            sqlx::query_scalar("SELECT state FROM taskcraft_tasks WHERE queue = $1 AND id = $2")
+                .bind(&*self.queue)
+                .bind(id.as_str())
+                .fetch_optional(&self.shared.pool)
+                .await?;
+        Ok(match state.as_deref().map(parse_state).transpose()? {
+            Some(state) => Requeue::NotFailed(state),
+            None => Requeue::NotFound,
         })
     }
 

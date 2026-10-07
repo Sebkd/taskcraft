@@ -21,6 +21,8 @@ use crate::retry::RetryPolicy;
 use crate::source::{
     AckPointSupport, Consumed, PushSource, Pushed, Source, StoreMessage, Stored, TaskStore,
 };
+use crate::state::TaskState;
+use crate::status::FinishReason;
 use crate::task::{AckPoint, Task};
 
 /// What the dead-letter hook receives: a message that could not be decoded.
@@ -67,6 +69,24 @@ pub enum TimeoutOutcome {
 }
 
 pub(crate) type RejectFn<Args> = Arc<dyn Fn(Task<Args>) + Send + Sync>;
+
+/// What the failed-task hook receives: a task that ended failed or panicked
+/// (rule 2.3.26).
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct FailedTask<Args> {
+    /// The queue it ran in.
+    pub queue: String,
+    /// The task: arguments, metadata and the number of its last attempt.
+    pub task: Task<Args>,
+    /// Failed or panicked.
+    pub state: TaskState,
+    /// Why: the abort reason, "attempts exhausted", "attempt timed out", the
+    /// panic message.
+    pub reason: FinishReason,
+}
+
+pub(crate) type FailedFn<Args> = Arc<dyn Fn(FailedTask<Args>) + Send + Sync>;
 
 /// What happens to an accepted task when no slot is free (rule 2.3.7).
 pub(crate) enum OverflowPolicy<Args> {
@@ -118,6 +138,7 @@ pub struct Queue<B: Backend, C, Svc, Args> {
     pub(crate) overflow: OverflowPolicy<Args>,
     pub(crate) tasks: Arc<TaskRegistry>,
     pub(crate) recovery: Option<RecoveryFn<Args>>,
+    pub(crate) failed: Option<FailedFn<Args>>,
     pub(crate) observers: ObserverCell,
     pub(crate) _args: PhantomData<fn() -> Args>,
 }
@@ -203,6 +224,7 @@ impl<B: Backend, C, Svc, Args> fmt::Debug for Queue<B, C, Svc, Args> {
             .field("dead_letter", &self.dead_letter.is_some())
             .field("overflow", &self.overflow)
             .field("recovery", &self.recovery.is_some())
+            .field("failed_task", &self.failed.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -246,6 +268,7 @@ impl<B: Backend, C, Svc, Args> QueueBuilder<B, C, Svc, Args> {
                 overflow: OverflowPolicy::Wait { limit: None },
                 tasks: Arc::new(TaskRegistry::new()),
                 recovery: None,
+                failed: None,
                 observers: ObserverCell::default(),
                 _args: PhantomData,
             },
@@ -383,6 +406,21 @@ impl<B: Backend, C, Svc, Args> QueueBuilder<B, C, Svc, Args> {
             hook: Arc::new(hook),
             copy: Clone::clone,
         });
+        self
+    }
+
+    /// Called with every task that ends failed or panicked — aborted,
+    /// out of attempts, timed out, panicked — before its outcome is logged
+    /// and acknowledged (rule 2.3.26): send it to an error topic or a table
+    /// to look into. A cancelled task is not a failure.
+    ///
+    /// The hook runs in the task's place, holding its slot: hand slow work
+    /// to a spawned task. A panic of the hook is logged and changes nothing.
+    pub fn failed_task<F>(mut self, hook: F) -> Self
+    where
+        F: Fn(FailedTask<Args>) + Send + Sync + 'static,
+    {
+        self.queue.failed = Some(Arc::new(hook));
         self
     }
 

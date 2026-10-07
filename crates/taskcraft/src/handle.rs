@@ -14,7 +14,8 @@ use crate::observe::{Event, ObserverCell, observers_of};
 use crate::outcome::BoxError;
 use crate::registry::TaskRegistry;
 use crate::source::{
-    AckOverrideUnsupported, AckPointSupport, Capabilities, PushError, PushResult, Withdrawal,
+    AckOverrideUnsupported, AckPointSupport, Capabilities, PushError, PushResult, Requeue,
+    Withdrawal,
 };
 use crate::state::TaskState;
 use crate::status::{PushOutcome, RejectReason, TaskStatus};
@@ -45,6 +46,22 @@ pub enum PushTaskError {
     Source(BoxError),
 }
 
+/// A failed task that could not be queued again (rule 2.3.26).
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum RequeueError {
+    /// The task is not failed or panicked: it is live, succeeded or
+    /// cancelled.
+    #[error("task is not failed: {0}")]
+    NotFailed(TaskState),
+    /// No such task. Only a task store remembers failed tasks.
+    #[error("task is unknown")]
+    Unknown,
+    /// The source failed; try again later.
+    #[error("source failed: {0}")]
+    Source(BoxError),
+}
+
 /// The answer to a cancel request (spec 2.1.2.15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -70,6 +87,8 @@ pub(crate) trait Port<Args>: Send + Sync {
     fn status<'a>(&'a self, id: &'a TaskId) -> BoxFuture<'a, Result<Option<TaskStatus>, BoxError>>;
 
     fn remove<'a>(&'a self, id: &'a TaskId) -> BoxFuture<'a, Result<Withdrawal, BoxError>>;
+
+    fn requeue<'a>(&'a self, id: &'a TaskId) -> BoxFuture<'a, Result<Requeue, BoxError>>;
 
     /// Encodes the task and stores it, held back until `at` if given.
     fn push<'a>(
@@ -102,6 +121,10 @@ where
 
     fn remove<'a>(&'a self, id: &'a TaskId) -> BoxFuture<'a, Result<Withdrawal, BoxError>> {
         Box::pin(async move { self.backend.remove(id).await.map_err(Into::into) })
+    }
+
+    fn requeue<'a>(&'a self, id: &'a TaskId) -> BoxFuture<'a, Result<Requeue, BoxError>> {
+        Box::pin(async move { self.backend.requeue(id).await.map_err(Into::into) })
     }
 
     fn push<'a>(
@@ -193,6 +216,30 @@ impl<Args> HandleCore<Args> {
             );
         }
         outcome
+    }
+
+    async fn requeue(&self, id: &TaskId) -> Result<(), RequeueError> {
+        if let Some(state) = self.tasks.state(id) {
+            return Err(RequeueError::NotFailed(state));
+        }
+        match self.port.requeue(id).await.map_err(RequeueError::Source)? {
+            Requeue::Requeued => {
+                info!(
+                    event = "task",
+                    action = "requeued",
+                    "task requeued: queue={}, task_id={}",
+                    self.name,
+                    id
+                );
+                observers_of(&self.observers).emit(&Event::Pushed {
+                    queue: &self.name,
+                    task_id: id,
+                });
+                Ok(())
+            }
+            Requeue::NotFailed(state) => Err(RequeueError::NotFailed(state)),
+            Requeue::NotFound => Err(RequeueError::Unknown),
+        }
     }
 
     async fn push(&self, task: Task<Args>) -> Result<PushOutcome, PushTaskError> {
@@ -329,6 +376,19 @@ impl<Args> QueueHandle<Args> {
     /// encoded.
     pub async fn push(&self, task: Task<Args>) -> Result<PushOutcome, PushTaskError> {
         self.core.push(task).await
+    }
+
+    /// Queues a failed or panicked task again (rule 2.3.26): its retries
+    /// start over, its attempt number goes on. Only a task store keeps
+    /// failed tasks — until their retention ends; any other source answers
+    /// [`RequeueError::Unknown`].
+    ///
+    /// # Errors
+    ///
+    /// [`RequeueError`] when the task is not failed, unknown, or the source
+    /// failed.
+    pub async fn requeue(&self, id: &TaskId) -> Result<(), RequeueError> {
+        self.core.requeue(id).await
     }
 }
 

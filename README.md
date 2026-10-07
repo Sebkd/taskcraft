@@ -99,6 +99,39 @@ async fn call_gateway(_order: u64) -> Result<Gateway, std::io::Error> { Ok(Gatew
 `?` on any error retries; `or_abort()` marks an error as final however it is
 wrapped later. Full example: [`outcomes`](https://github.com/Sebkd/taskcraft/blob/master/crates/taskcraft/examples/outcomes.rs).
 
+### Failed tasks: a hook, and running them again
+
+```rust
+use std::sync::Arc;
+use taskcraft::codec::IdentityCodec;
+use taskcraft::error::RequeueError;
+use taskcraft::{FailedTask, InMemorySource, Queue, QueueHandle, TaskId, task_fn};
+
+async fn charge(order: u64) {}
+
+fn send_to_error_topic(order: u64, why: String) { /* hand it to a spawned task */ }
+
+fn build() -> Result<(), taskcraft::error::ConfigError> {
+    let _payments = Queue::builder("payments", Arc::new(InMemorySource::default()), IdentityCodec::new(), task_fn(charge))
+        // Aborted, out of attempts, timed out or panicked: before the outcome is acknowledged.
+        .failed_task(|failed: FailedTask<u64>| send_to_error_topic(*failed.task.args(), failed.reason.to_string()))
+        .no_recovery()
+        .build()?;
+    Ok(())
+}
+
+// With a task store, a failed task stays there: once the cause is fixed,
+// queue it again — retries start over, the attempt number goes on.
+async fn retry_by_hand(payments: &QueueHandle<u64>) -> Result<(), RequeueError> {
+    payments.requeue(&TaskId::new("order-17")).await
+}
+```
+
+A cancelled task is not a failure and does not reach the hook. Full
+examples: [`outcomes`](https://github.com/Sebkd/taskcraft/blob/master/crates/taskcraft/examples/outcomes.rs)
+for the hook, [`durable-store`](https://github.com/Sebkd/taskcraft/blob/master/crates/taskcraft-postgres/examples/durable-store.rs)
+for `requeue`.
+
 ### Long tasks: reject when full, pause without holding a slot
 
 ```rust

@@ -2,6 +2,7 @@
 //! (rules 2.3.2–2.3.6, 2.3.9, 2.3.15, 2.3.16).
 
 use std::future::pending;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
@@ -20,7 +21,7 @@ use crate::handler::TaskRequest;
 use crate::metadata::TraceParent;
 use crate::observe::{AttemptEnd, Event, Waiting};
 use crate::outcome::{BoxError, Outcome};
-use crate::queue::TimeoutOutcome;
+use crate::queue::{FailedFn, FailedTask, TimeoutOutcome};
 use crate::registry::TaskRegistry;
 use crate::source::{Completion, Progress};
 use crate::state::{Lifecycle, TaskState};
@@ -33,6 +34,40 @@ enum Next {
     Finish(TaskState, Option<FinishReason>),
     /// Wait, then run again (rules 2.3.4, 2.3.6).
     Pause(Duration),
+}
+
+/// How the task came: its delivery, if from the source, and whether it is
+/// acknowledged on its final state.
+pub(super) struct Delivered<S: Backend> {
+    pub(super) receipt: Option<S::Receipt>,
+    pub(super) ack_later: bool,
+}
+
+/// Hands a failed or panicked task to the queue's hook before its outcome
+/// is recorded (rule 2.3.26); a panic of the hook changes nothing.
+fn report_failure<Args>(
+    queue: &str,
+    hook: &FailedFn<Args>,
+    task: Task<Args>,
+    state: TaskState,
+    reason: FinishReason,
+) {
+    let id = task.id().clone();
+    let failed = FailedTask {
+        queue: queue.to_owned(),
+        task,
+        state,
+        reason,
+    };
+    if catch_unwind(AssertUnwindSafe(|| hook(failed))).is_err() {
+        error!(
+            event = "task",
+            action = "failed_hook_failed",
+            "failed-task hook panicked: queue={}, task_id={}",
+            queue,
+            id
+        );
+    }
 }
 
 /// One task on its way through the worker.
@@ -72,11 +107,11 @@ impl<S: Backend> Run<S> {
 /// (rules 2.3.2–2.3.6, 2.3.9, 2.3.15).
 pub(super) async fn execute<S, C, Svc, Args>(
     mut task: Task<Args>,
-    receipt: Option<S::Receipt>,
-    ack_later: bool,
+    delivered: Delivered<S>,
     mut service: Svc,
     cancel: CancellationToken,
     slot: Slot,
+    failed: Option<FailedFn<Args>>,
     ctx: Arc<ExecCtx<S, C>>,
 ) -> TaskEnd
 where
@@ -90,8 +125,8 @@ where
     let mut run = Run {
         id: task.id().clone(),
         life: Lifecycle::accepted(),
-        receipt,
-        ack_later,
+        receipt: delivered.receipt,
+        ack_later: delivered.ack_later,
         cancel,
     };
     let mut slot = slot;
@@ -102,13 +137,19 @@ where
         };
         match run_once(&ctx, &mut run, &mut task, &mut service).await {
             Next::Finish(state, reason) => {
+                let attempt = task.attempt();
+                if let (Some(hook), Some(reason)) = (&failed, &reason)
+                    && matches!(state, TaskState::Failed | TaskState::Panicked)
+                {
+                    report_failure(&ctx.queue, hook, task, state, reason.clone());
+                }
                 let end = (state, reason);
                 let receipt = run.receipt.take();
                 let ended = finish(
                     &ctx,
                     &mut run.life,
                     &run.id,
-                    task.attempt(),
+                    attempt,
                     receipt,
                     run.ack_later,
                     end,
