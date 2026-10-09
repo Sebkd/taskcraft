@@ -91,7 +91,7 @@ impl PgSource {
         if inserted == 1 {
             // A held-back task gives this process nothing to do yet.
             if next.is_none() {
-                self.held.wake.wake();
+                self.shared.wake(&self.queue);
                 announce(&self.shared, &self.queue).await;
             }
             return Ok(PushResult::Stored);
@@ -367,7 +367,7 @@ impl TaskStore for PgSource {
         .await?
         .rows_affected();
         if requeued == 1 {
-            self.held.wake.wake();
+            self.shared.wake(&self.queue);
             announce(&self.shared, &self.queue).await;
             return Ok(Requeue::Requeued);
         }
