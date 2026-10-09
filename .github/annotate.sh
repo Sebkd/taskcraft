@@ -8,7 +8,9 @@ shift
 "$@" 2>&1 | tee "$log"
 status=${PIPESTATUS[0]}
 if [ "$status" -ne 0 ]; then
-  grep -E 'error(\[|:)|ERROR|SUMMARY|panicked|Sanitizer|failed to|could not' "$log" \
+  # Colour codes split words such as `error:`; strip them first.
+  sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' "$log" \
+    | grep -E 'error(\[|:)|ERROR|SUMMARY|panicked|Sanitizer|failed to|could not|malformed|invalid' \
     | head -n 9 \
     | while IFS= read -r line; do echo "::error::${line:0:900}"; done
   echo "::error::exit status $status"

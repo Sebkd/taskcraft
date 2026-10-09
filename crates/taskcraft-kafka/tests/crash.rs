@@ -130,6 +130,9 @@ async fn killed_member_message_is_delivered_again() {
     let marker = std::env::temp_dir().join(format!("taskcraft-crash-{id}"));
     let child = Command::new(std::env::current_exe().unwrap())
         .args([CHILD, "--exact", "--nocapture"])
+        // Killed mid-write, its coverage profile would spoil the merged
+        // report: the child writes none.
+        .env("LLVM_PROFILE_FILE", "/dev/null")
         .env(CHILD_ENV, format!("{topic}|{group}|{}", marker.display()))
         .env("TASKCRAFT_KAFKA_BROKERS", &brokers)
         .spawn()
