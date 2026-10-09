@@ -110,6 +110,8 @@ async fn main() -> Result<(), BoxError> {
     }
     stop_b.cancel();
     running_b.await??;
+    // B stops cleanly: its id is free for its next start at once.
+    store_b.close().await?;
     let status = finished.ok_or("process B did not take the task over")?;
     println!(
         "taken over and finished {:?} after the crash, attempt {}",
