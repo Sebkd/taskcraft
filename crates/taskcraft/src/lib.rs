@@ -45,7 +45,7 @@
 //! - **More:** the [README](https://github.com/Sebkd/taskcraft#readme) tours
 //!   every capability; the
 //!   [example catalog](https://github.com/Sebkd/taskcraft/tree/master/examples)
-//!   has fifteen runnable examples; coming from 0.1, see the
+//!   has fifteen runnable examples; coming from an earlier version, see the
 //!   [migration guide](https://github.com/Sebkd/taskcraft/blob/master/MIGRATION.md).
 //!
 //! The behaviour is specified in

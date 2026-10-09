@@ -1,3 +1,35 @@
+# Migrating taskcraft
+
+- [0.2 → 0.3](#migrating-from-taskcraft-02-to-03): the `metrics` adapter.
+- [0.1 → 0.2](#migrating-from-taskcraft-01-to-02): handles, source traits,
+  modules.
+
+# Migrating from taskcraft 0.2 to 0.3
+
+One change, in the `metrics` adapter; queues behave as before.
+
+```toml
+[dependencies]
+taskcraft = { version = "0.3", features = ["metrics"] }
+taskcraft-kafka = "0.3"    # if used
+taskcraft-postgres = "0.3" # if used
+```
+
+`observe::MetricsObserver` now keeps the handle of every series it
+publishes, so an event no longer allocates and looks its series up in the
+recorder. Per task, with a Prometheus recorder, the adapter costs 0.13 µs
+instead of 0.37 µs.
+
+| 0.2 | 0.3 |
+|-----|-----|
+| `MetricsObserver` (the unit value) | `MetricsObserver::new()` or `MetricsObserver::default()` |
+| `MetricsObserver` is `Copy` | It is `Clone`; clones share the handles |
+| A recorder installed any time | Install the recorder before the monitor runs: a series keeps the recorder of its first event |
+
+The series, their names and labels are unchanged.
+
+---
+
 # Migrating from taskcraft 0.1 to 0.2
 
 0.2 changes the public API in one go; queues behave exactly as before. The

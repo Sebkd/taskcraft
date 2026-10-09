@@ -13,6 +13,9 @@ publish = false
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support", "async_tokio"] }
+metrics = { workspace = true }
+# A real exporter behind the `metrics` adapter, without its HTTP server.
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
 taskcraft = { path = "../taskcraft", features = ["metrics"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
 

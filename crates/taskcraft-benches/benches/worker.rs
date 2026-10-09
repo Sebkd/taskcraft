@@ -57,6 +57,8 @@ enum Extra {
     None,
     Pool,
     Metrics,
+    /// The `metrics` adapter with a Prometheus recorder installed.
+    Prometheus,
     Observer,
 }
 
@@ -66,6 +68,7 @@ impl Extra {
             Self::None => "none",
             Self::Pool => "pool",
             Self::Metrics => "metrics",
+            Self::Prometheus => "metrics_prometheus",
             Self::Observer => "observer",
         }
     }
@@ -103,6 +106,10 @@ async fn measure(iters: u64, concurrency: usize, extra: Extra, feed: Feed) -> Du
                 .unwrap();
         }
         Extra::Metrics => monitor = monitor.observer(MetricsObserver::new()),
+        Extra::Prometheus => {
+            install_prometheus();
+            monitor = monitor.observer(MetricsObserver::new());
+        }
         Extra::Observer => monitor = monitor.observer(Finished::default()),
     }
     let queue = builder.build().unwrap();
@@ -146,6 +153,15 @@ async fn push(handle: &Handle, n: u64) {
     }
 }
 
+/// Installs a Prometheus recorder as the global one, once.
+fn install_prometheus() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        metrics::set_global_recorder(recorder).unwrap();
+    });
+}
+
 fn runtime() -> Runtime {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -174,7 +190,14 @@ fn overhead(c: &mut Criterion) {
     let rt = runtime();
     let mut group = c.benchmark_group("overhead");
     group.throughput(Throughput::Elements(1));
-    for extra in [Extra::None, Extra::Pool, Extra::Metrics, Extra::Observer] {
+    // The recorder is global: the Prometheus case runs after the others.
+    for extra in [
+        Extra::None,
+        Extra::Pool,
+        Extra::Metrics,
+        Extra::Observer,
+        Extra::Prometheus,
+    ] {
         group.bench_function(extra.name(), |b| {
             b.to_async(&rt)
                 .iter_custom(|iters| measure(iters, 8, extra, Feed::Stream));
