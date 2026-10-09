@@ -350,13 +350,15 @@ impl TaskStore for PgSource {
         })
     }
 
-    /// Back to "queued" in one statement, retries reset, attempt kept; the
+    /// Back to "queued" in one statement, retries reset, attempt kept; a
+    /// cancel request of the failed run is dropped (spec 2.3.26 p. 4). The
     /// state tells "not failed" from "not found" when nothing changed.
     async fn requeue(&self, id: &TaskId) -> Result<Requeue, PgStoreError> {
         let requeued = sqlx::query(
             "UPDATE taskcraft_tasks
                 SET state = 'queued', retries = 0, reason = NULL, owner = NULL,
-                    lease_until = NULL, next_delivery = NULL, updated_at = now()
+                    lease_until = NULL, next_delivery = NULL,
+                    cancel_requested = false, updated_at = now()
               WHERE queue = $1 AND id = $2 AND state IN ('failed', 'panicked')",
         )
         .bind(&*self.queue)
