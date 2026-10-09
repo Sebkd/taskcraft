@@ -94,6 +94,9 @@ async fn killed_process_task_is_taken_over() {
     let (process, name) = (unique("child"), unique("q"));
     let child = Command::new(std::env::current_exe().unwrap())
         .args([CHILD, "--exact", "--nocapture"])
+        // Killed mid-write, its coverage profile would spoil the merged
+        // report: the child writes none.
+        .env("LLVM_PROFILE_FILE", "/dev/null")
         .env(CHILD_ENV, format!("{process}|{name}"))
         .env("TASKCRAFT_POSTGRES_URL", &url)
         .spawn()
