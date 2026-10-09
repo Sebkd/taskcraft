@@ -599,6 +599,81 @@ async fn requeue_clears_cancel_request() {
     running.await.unwrap();
 }
 
+/// Change store-queue-shared-registration: a second source of a queue in
+/// the same process wakes the workers of the first, and the tasks they hold
+/// keep their leases while both sources live.
+#[tokio::test(flavor = "multi_thread")]
+async fn second_source_of_a_queue_keeps_the_first_working() {
+    let Some(url) = url() else { return };
+    let name = unique("q");
+    let store = PgStore::builder(unique("p"))
+        .alive_interval(ALIVE)
+        .lease(LEASE)
+        .notifications(false)
+        .connect(&url)
+        .await
+        .unwrap();
+    let seen: Arc<Mutex<Vec<(u32, u32)>>> = Arc::default();
+    let (monitor, handle) = queue(&name, store.queue(&name), &seen);
+    let (running, stop) = run(monitor);
+    // Idle long enough for the poll backoff to exceed 6 s.
+    sleep(8 * SEC).await;
+
+    let service = store.queue(&name);
+    let message = r#"{"id":"t","args":4,"metadata":{},"attempt":0,"retries":0}"#;
+    let _ = service
+        .push(
+            &TaskId::new("t"),
+            StoreMessage::from_bytes(message.as_bytes().to_vec()),
+        )
+        .await
+        .unwrap();
+    assert!(
+        until(1500 * Duration::from_millis(1), async || state(
+            &handle, "t"
+        )
+        .await
+            == Some(TaskState::Running))
+        .await,
+        "the push woke the first source's workers"
+    );
+
+    // Renewed all along: without renewal the lease runs out and the task is
+    // claimed again (by this very process, or by another one).
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    for _ in 0..9 {
+        let (task_state, left): (String, f64) = sqlx::query_as(
+            "SELECT state, extract(epoch FROM lease_until - now())::float8
+               FROM taskcraft_tasks WHERE queue = $1 AND id = 't'",
+        )
+        .bind(&name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(task_state, "running", "the task was claimed again");
+        assert!(left > 0.0, "the lease ran out");
+        sleep(LEASE.duration / 3).await;
+    }
+    let other = store_other(&url).await.queue(&name);
+    assert!(
+        matches!(other.poll().await.unwrap(), Polled::Empty),
+        "taken by another process"
+    );
+    assert_eq!(state(&handle, "t").await, Some(TaskState::Running));
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(4, 1)],
+        "one run, never taken again"
+    );
+    drop(service);
+    stop.cancel();
+    running.await.unwrap();
+}
+
+async fn store_other(url: &str) -> PgStore {
+    store(url, &unique("o"), true).await
+}
+
 /// The records of a thread while installed, as `field=value` lines.
 #[derive(Clone, Default)]
 struct Logs(Arc<Mutex<Vec<String>>>);

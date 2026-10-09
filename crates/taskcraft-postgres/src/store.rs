@@ -272,7 +272,11 @@ impl PgStore {
             notify,
             wake: WakeHandle::new(),
         });
-        lock(&self.shared.queues).insert(Arc::clone(&name), Arc::clone(&held));
+        let mut queues = lock(&self.shared.queues);
+        let sources = queues.entry(Arc::clone(&name)).or_default();
+        sources.retain(|held| held.strong_count() > 0);
+        sources.push(Arc::downgrade(&held));
+        drop(queues);
         PgSource::new(Arc::clone(&self.shared), name, held, notices)
     }
 
@@ -339,7 +343,9 @@ impl fmt::Debug for PgStore {
     }
 }
 
-/// Tasks a queue of this process holds, and where to report about them.
+/// Tasks one source of a queue holds, and where to report about them. A
+/// queue may have several sources in a process (one running, another for
+/// status and pushes): each keeps its own.
 #[derive(Debug)]
 pub(crate) struct Held {
     /// Task id → a cancel request was already reported.
@@ -360,9 +366,40 @@ pub(crate) struct Shared {
     cleanup_interval: Duration,
     cleanup_batch: u32,
     notifications: bool,
-    queues: Mutex<HashMap<Arc<str>, Arc<Held>>>,
+    /// Queue name → the bookkeeping of its live sources in this process.
+    queues: Mutex<HashMap<Arc<str>, Vec<Weak<Held>>>>,
     /// Upkeep and the notification listener, stopped with the store.
     upkeep: Mutex<Vec<JoinHandle<()>>>,
+}
+
+impl Shared {
+    /// The live sources of `queue` in this process.
+    fn sources(&self, queue: &str) -> Vec<Arc<Held>> {
+        lock(&self.queues)
+            .get(queue)
+            .map(|sources| sources.iter().filter_map(Weak::upgrade).collect())
+            .unwrap_or_default()
+    }
+
+    /// Every live source in this process, with its queue.
+    fn all_sources(&self) -> Vec<(Arc<str>, Arc<Held>)> {
+        lock(&self.queues)
+            .iter()
+            .flat_map(|(queue, sources)| {
+                sources
+                    .iter()
+                    .filter_map(Weak::upgrade)
+                    .map(|held| (Arc::clone(queue), held))
+            })
+            .collect()
+    }
+
+    /// Wakes the workers of every source of `queue` in this process.
+    pub(crate) fn wake(&self, queue: &str) {
+        for held in self.sources(queue) {
+            held.wake.wake();
+        }
+    }
 }
 
 impl Drop for Shared {
@@ -521,9 +558,7 @@ async fn listen(shared: Weak<Shared>, mut listener: PgListener) {
         };
         let error = match received {
             Ok(Some(notification)) => {
-                if let Some(held) = lock(&shared.queues).get(notification.payload()) {
-                    held.wake.wake();
-                }
+                shared.wake(notification.payload());
                 continue;
             }
             Ok(None) => "connection lost".to_owned(),
@@ -537,7 +572,7 @@ async fn listen(shared: Weak<Shared>, mut listener: PgListener) {
             shared.process_id,
             error
         );
-        for held in lock(&shared.queues).values() {
+        for (_, held) in shared.all_sources() {
             held.wake.wake();
         }
         drop(shared);
@@ -641,11 +676,7 @@ async fn upkeep_once(shared: &Shared) -> Result<(), sqlx::Error> {
         .bind(&shared.process_id)
         .execute(&shared.pool)
         .await?;
-    let queues: Vec<(Arc<str>, Arc<Held>)> = lock(&shared.queues)
-        .iter()
-        .map(|(q, h)| (Arc::clone(q), Arc::clone(h)))
-        .collect();
-    for (queue, held) in queues {
+    for (queue, held) in shared.all_sources() {
         let ids: Vec<String> = lock(&held.tasks)
             .keys()
             .map(|id| id.as_str().to_owned())
