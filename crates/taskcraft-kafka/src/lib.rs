@@ -5,6 +5,10 @@
 //! - **Commit boundary.** Auto commit is always off. An ack commits the
 //!   partition's offset only up to the last task such that every earlier
 //!   task of the partition reached its ack point too.
+//! - **Order within a partition** holds only with concurrency 1 and a retry
+//!   policy that holds the slot (`RetryPolicy::hold_slot`): otherwise a task
+//!   waiting for a retry or a defer frees the slot and the next message runs
+//!   first. Higher concurrency runs a partition's messages in parallel.
 //! - **Task ids** come from the message key by default ([`KafkaSourceBuilder::task_id`]
 //!   changes that). A message without one gets a generated id, and its
 //!   redelivery is then not recognised as a duplicate.

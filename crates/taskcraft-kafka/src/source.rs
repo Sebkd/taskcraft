@@ -232,6 +232,9 @@ impl fmt::Debug for KafkaSourceBuilder {
 /// - An ack commits the partition's offset by the commit boundary: a task not
 ///   acknowledged yet holds back the commit of every later task of its
 ///   partition (rule 2.3.9 p. 5).
+/// - Messages of a partition come in order; the queue runs them in order
+///   only with concurrency 1 and `RetryPolicy::hold_slot` (see the crate
+///   documentation).
 /// - Partitions are shared between the processes of a group by Kafka; after
 ///   a rebalance, unfinished deliveries of a revoked partition commit
 ///   nothing and reach another consumer again.
