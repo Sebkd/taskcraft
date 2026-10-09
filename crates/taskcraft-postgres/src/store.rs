@@ -316,21 +316,66 @@ impl PgStore {
         if alive(&mut tx, process_id, shared.alive_interval).await? {
             return Err(PgStoreError::ProcessIdTaken(process_id.to_owned()));
         }
-        let queues = return_tasks(&mut tx, process_id).await?;
-        tx.commit().await?;
-        for (queue, _) in &queues {
-            announce(shared, queue).await;
-        }
-        let count: i64 = queues.iter().map(|(_, n)| n).sum();
-        info!(
-            event = "recovery",
-            action = "released",
-            "tasks released: owner={}, count={}",
-            process_id,
-            count
-        );
-        Ok(u64::try_from(count).unwrap_or(0))
+        release(shared, tx, process_id).await
     }
+
+    /// Closes the store when the process stops (rule 2.3.19 p. 7): stops
+    /// the upkeep, gives the tasks this process left unfinished back to
+    /// their queues, attempt counts kept, and removes its "alive" mark — a
+    /// process with the same id starts at once, and other processes take
+    /// the tasks without waiting for their leases. Returns how many tasks
+    /// went back. Closing again does nothing and returns 0. The pool stays
+    /// open: it may be the application's.
+    ///
+    /// Call it after [`Monitor::run`](taskcraft::Monitor::run) returned:
+    /// tasks still running would go back to their queues and run twice.
+    /// A crashed process does not close; its tasks wait for its restart or
+    /// for their leases, as before.
+    ///
+    /// # Errors
+    ///
+    /// [`PgStoreError::Database`] when the database fails; the upkeep is
+    /// stopped anyway, and the next start with this id waits for the
+    /// "alive" mark to age.
+    pub async fn close(&self) -> Result<u64, PgStoreError> {
+        let shared = &self.shared;
+        for handle in lock(&shared.upkeep).drain(..) {
+            handle.abort();
+        }
+        let mut tx = shared.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(&shared.process_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM taskcraft_processes WHERE id = $1")
+            .bind(&shared.process_id)
+            .execute(&mut *tx)
+            .await?;
+        release(shared, tx, &shared.process_id).await
+    }
+}
+
+/// Gives the unfinished tasks of `owner` back in `tx` and commits, then
+/// wakes their queues and logs `recovery/released`; returns how many.
+async fn release(
+    shared: &Shared,
+    mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    owner: &str,
+) -> Result<u64, PgStoreError> {
+    let queues = return_tasks(&mut tx, owner).await?;
+    tx.commit().await?;
+    for (queue, _) in &queues {
+        announce(shared, queue).await;
+    }
+    let count: i64 = queues.iter().map(|(_, n)| n).sum();
+    info!(
+        event = "recovery",
+        action = "released",
+        "tasks released: owner={}, count={}",
+        owner,
+        count
+    );
+    Ok(u64::try_from(count).unwrap_or(0))
 }
 
 impl fmt::Debug for PgStore {

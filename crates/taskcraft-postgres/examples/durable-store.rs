@@ -160,7 +160,7 @@ async fn main() -> Result<(), BoxError> {
     println!("  crashed; restarting with the same process id");
     sleep(3 * ALIVE).await;
 
-    let (_store, handle, running, stop) = start(&url, &process, &queue_name).await?;
+    let (store, handle, running, stop) = start(&url, &process, &queue_name).await?;
     wait_for(&handle, "hang", TaskState::Succeeded).await?;
     let status = handle
         .fetch_status(&TaskId::new("hang"))
@@ -169,6 +169,8 @@ async fn main() -> Result<(), BoxError> {
     println!("  hang finished on attempt {}", status.attempt());
     stop.cancel();
     running.await??;
+    // A clean stop: the id is free for the next start at once.
+    store.close().await?;
     if status.attempt() != 2 {
         return Err("expected the second attempt after the restart".into());
     }

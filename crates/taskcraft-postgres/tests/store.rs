@@ -214,7 +214,11 @@ async fn a_live_process_id_is_taken() {
 /// store goes away without finishing them.
 async fn claim_and_crash(url: &str, process: &str, name: &str, lease: bool) {
     let store = store(url, process, lease).await;
-    let source = store.queue(name);
+    take_two(&store.queue(name)).await;
+}
+
+/// Pushes tasks `t1` and `t2` and takes both into "running", attempt 1.
+async fn take_two(source: &PgSource) {
     for id in ["t1", "t2"] {
         let message =
             format!(r#"{{"id":"{id}","args":0,"metadata":{{}},"attempt":0,"retries":0}}"#);
@@ -672,6 +676,58 @@ async fn second_source_of_a_queue_keeps_the_first_working() {
 
 async fn store_other(url: &str) -> PgStore {
     store(url, &unique("o"), true).await
+}
+
+/// Change store-close, criterion 1: a closed process restarts with its id
+/// at once; closing twice is harmless.
+#[tokio::test]
+async fn closed_process_id_restarts_at_once() {
+    let Some(url) = url() else { return };
+    let process = unique("p");
+    let first = store(&url, &process, false).await;
+    assert_eq!(first.close().await.unwrap(), 0);
+    assert_eq!(first.close().await.unwrap(), 0);
+    let restarted = PgStore::builder(&process)
+        .alive_interval(ALIVE)
+        .connect(&url)
+        .await;
+    assert!(restarted.is_ok(), "{restarted:?}");
+}
+
+/// Change store-close, criterion 2: closing gives the unfinished tasks back
+/// at once, attempt counts kept, and another process takes them.
+#[tokio::test]
+async fn close_releases_unfinished_tasks() {
+    let Some(url) = url() else { return };
+    let (process, name) = (unique("p"), unique("q"));
+    let owner = store(&url, &process, true).await;
+    take_two(&owner.queue(&name)).await;
+
+    let logs = Logs::default();
+    let released = {
+        let _guard = logs.install();
+        owner.close().await.unwrap()
+    };
+    assert_eq!(released, 2);
+    assert_eq!(
+        states(&url, &name).await,
+        [("queued".to_owned(), 1), ("queued".to_owned(), 1)]
+    );
+    let records = logs.find("released", &process);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert!(records[0].contains("count=2"));
+
+    let other = store(&url, &unique("o"), true).await.queue(&name);
+    for _ in 0..2 {
+        let Polled::Task { message, .. } = other.poll().await.unwrap() else {
+            panic!("not taken at once");
+        };
+        let task = String::from_utf8(message.into_bytes()).unwrap();
+        assert!(
+            task.contains(r#""attempt": 1"#) || task.contains(r#""attempt":1"#),
+            "{task}"
+        );
+    }
 }
 
 /// The records of a thread while installed, as `field=value` lines.

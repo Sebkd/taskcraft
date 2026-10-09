@@ -46,9 +46,34 @@ async fn main() -> Result<(), BoxError> {
         println!("the owner stops it at its next renewal");
     }
     running.await??;
+    store.close().await?; // after the monitor stopped: see "Stopping"
     Ok(())
 }
 ```
+
+## Stopping
+
+Close the store once `Monitor::run` has returned. `close` gives the tasks
+the stop interrupted back to their queues, attempt counts kept, and clears
+the process's "alive" mark: other processes take the tasks at once instead
+of waiting for their leases, and a restart with the same id — a StatefulSet
+pod, a stop-then-start deployment — is not refused as "process id taken".
+
+```rust,no_run
+# async fn stop(
+#     store: taskcraft_postgres::PgStore,
+#     monitor: taskcraft::Monitor,
+#     shutdown: taskcraft::CancellationToken,
+# ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+monitor.run(shutdown).await?;     // the workers are done
+let released = store.close().await?;
+println!("{released} interrupted tasks back in their queues");
+# Ok(()) }
+```
+
+Closing earlier would hand tasks that are still running to other processes.
+A process that crashes does not close: its tasks wait for its restart or
+for their leases.
 
 ## Sharing the application's pool
 
