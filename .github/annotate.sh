@@ -11,8 +11,12 @@ if [ "$status" -ne 0 ]; then
   # Colour codes split words such as `error:`; strip them first.
   sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' "$log" \
     | grep -E 'error(\[|:)|ERROR|SUMMARY|panicked|Sanitizer|failed to|could not|malformed|invalid' \
-    | head -n 9 \
-    | while IFS= read -r line; do echo "::error::${line:0:900}"; done
+    | head -n 9 > "$log.why"
+  # Nothing recognised: the last lines as they are.
+  if [ ! -s "$log.why" ]; then
+    sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' "$log" | grep -v '^[[:space:]]*$' | tail -n 8 > "$log.why"
+  fi
+  while IFS= read -r line; do echo "::error::${line:0:900}"; done < "$log.why"
   echo "::error::exit status $status"
 fi
 exit "$status"
