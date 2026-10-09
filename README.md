@@ -29,7 +29,7 @@ restart and can be asked about — and stopped — by id.
 
 ```toml
 [dependencies]
-taskcraft = "0.2"
+taskcraft = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 A handler is a plain `async fn` of the task's arguments plus any values it
 wants to extract: `Attempt`, `TaskId`, `Meta<T>`, `Data<T>`, `Cancel`.
 
-Upgrading from 0.1? See the [migration guide](https://github.com/Sebkd/taskcraft/blob/master/MIGRATION.md).
+Upgrading from an earlier version? See the [migration guide](https://github.com/Sebkd/taskcraft/blob/master/MIGRATION.md).
 
 ## A tour
 
