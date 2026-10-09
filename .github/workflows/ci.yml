@@ -296,8 +296,8 @@ jobs:
       # on one thread, as in the Kafka job.
       - name: Measure
         run: |
-          cargo llvm-cov --no-report --workspace --all-features --locked --exclude taskcraft-kafka
-          cargo llvm-cov --no-report -p taskcraft-kafka --all-features --locked -- --test-threads 1
+          .github/annotate.sh measure.log cargo llvm-cov --no-report --workspace --all-features --locked --exclude taskcraft-kafka
+          .github/annotate.sh measure-kafka.log cargo llvm-cov --no-report -p taskcraft-kafka --all-features --locked -- --test-threads 1
 
       # The threshold sits below what CI measures (85.9% of lines on 0.2.2;
       # a local run counts 89.8%: CI reports more regions in a few core files,
@@ -351,7 +351,7 @@ jobs:
           exit 1
 
       - name: Test
-        run: cargo test -p taskcraft-kafka --locked -- --test-threads 1
+        run: .github/annotate.sh test.log cargo test -p taskcraft-kafka --locked -- --test-threads 1
 
   postgres:
     name: Task store (PostgreSQL)
