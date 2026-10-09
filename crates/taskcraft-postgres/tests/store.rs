@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use taskcraft::error::RequeueError;
-use taskcraft::source::{Notice, Polled, StoreMessage, TaskStore};
+use taskcraft::source::{Completion, Notice, Polled, StoreMessage, TaskStore, Withdrawal};
 use taskcraft::{
     Attempt, Cancel, CancelOutcome, CancellationToken, FinishReason, Monitor, Outcome,
     PollStrategy, PushOutcome, Queue, QueueHandle, ShutdownReport, Task, TaskId, TaskState,
@@ -530,6 +530,71 @@ async fn failed_task_is_requeued() {
     );
     let unknown = handle.requeue(&TaskId::new("never-pushed")).await;
     assert!(matches!(unknown, Err(RequeueError::Unknown)), "{unknown:?}");
+    stop.cancel();
+    running.await.unwrap();
+}
+
+/// Change store-requeue-clears-cancel: a cancel request that came during a
+/// failed attempt does not cancel the requeued run.
+#[tokio::test(flavor = "multi_thread")]
+async fn requeue_clears_cancel_request() {
+    let Some(url) = url() else { return };
+    let name = unique("q");
+    let first = store(&url, &unique("p"), true).await.queue(&name);
+    let message = r#"{"id":"t","args":4,"metadata":{},"attempt":0,"retries":0}"#;
+    let _ = first
+        .push(
+            &TaskId::new("t"),
+            StoreMessage::from_bytes(message.as_bytes().to_vec()),
+        )
+        .await
+        .unwrap();
+    let Polled::Task { receipt, .. } = first.poll().await.unwrap() else {
+        panic!("expected a task");
+    };
+    let progress = taskcraft::source::Progress {
+        state: TaskState::Running,
+        attempt: 1,
+        retries: 0,
+    };
+    first.progress(receipt.clone(), progress).await.unwrap();
+    assert_eq!(
+        first.remove(&TaskId::new("t")).await.unwrap(),
+        Withdrawal::CancelRequested
+    );
+    let reason = FinishReason::Handler("failed before the request was read".into());
+    let completion = Completion {
+        state: TaskState::Failed,
+        reason: Some(&reason),
+    };
+    first.complete(receipt, completion).await.unwrap();
+    assert!(matches!(
+        first.requeue(&TaskId::new("t")).await.unwrap(),
+        taskcraft::source::Requeue::Requeued
+    ));
+
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    let requested: bool = sqlx::query_scalar(
+        "SELECT cancel_requested FROM taskcraft_tasks WHERE queue = $1 AND id = 't'",
+    )
+    .bind(&name)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!requested, "cancel request kept");
+
+    let store = store(&url, &unique("p"), true).await;
+    let seen = Arc::default();
+    let (monitor, handle) = queue(&name, store.queue(&name), &seen);
+    let (running, stop) = run(monitor);
+    assert!(
+        until(10 * SEC, async || state(&handle, "t").await
+            == Some(TaskState::Running))
+        .await
+    );
+    // Several renewals, and longer than the cancel grace.
+    sleep(LEASE.heartbeat * 3 + SEC).await;
+    assert_eq!(state(&handle, "t").await, Some(TaskState::Running));
     stop.cancel();
     running.await.unwrap();
 }
