@@ -285,8 +285,9 @@ async fn shutdown_report_counts_a_task_in_a_pause() {
 }
 
 /// Change criterion 3: the slot is free during a pause unless the policy
-/// holds it.
-async fn second_task_start(hold_slot: bool) -> Duration {
+/// holds it — a retry pause, or a defer waiting in process (change
+/// kafka-partition-order-docs: what keeps a partition in order).
+async fn second_task_start(hold_slot: bool, defer: bool) -> Duration {
     let source: Faulty = Arc::default();
     let runs: Runs = Arc::default();
     let start = Instant::now();
@@ -295,7 +296,11 @@ async fn second_task_start(hold_slot: bool) -> Duration {
         record(&r, start, n, attempt);
         async move {
             if n == 0 && attempt == 1 {
-                Outcome::retry("once")
+                if defer {
+                    Outcome::defer(60 * SEC, "not now")
+                } else {
+                    Outcome::retry("once")
+                }
             } else {
                 Outcome::Success
             }
@@ -322,10 +327,20 @@ async fn second_task_start(hold_slot: bool) -> Duration {
 
 #[tokio::test(start_paused = true)]
 async fn released_slot_lets_another_task_run_during_the_pause() {
-    assert!(second_task_start(false).await < 60 * SEC);
+    assert!(second_task_start(false, false).await < 60 * SEC);
 }
 
 #[tokio::test(start_paused = true)]
 async fn held_slot_keeps_other_tasks_waiting_through_the_pause() {
-    assert!(second_task_start(true).await >= 60 * SEC);
+    assert!(second_task_start(true, false).await >= 60 * SEC);
+}
+
+#[tokio::test(start_paused = true)]
+async fn released_slot_lets_another_task_run_during_a_defer() {
+    assert!(second_task_start(false, true).await < 60 * SEC);
+}
+
+#[tokio::test(start_paused = true)]
+async fn held_slot_keeps_other_tasks_waiting_through_a_defer() {
+    assert!(second_task_start(true, true).await >= 60 * SEC);
 }

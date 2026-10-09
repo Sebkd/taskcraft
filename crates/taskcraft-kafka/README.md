@@ -51,6 +51,14 @@ async fn main() -> Result<(), BoxError> {
   say. An ack commits a partition's offset only past tasks that are all done:
   an unfinished task holds back the commit of every later task of its
   partition.
+- **Order within a partition.** The source hands a partition's messages out
+  in order; the queue runs them in order only with concurrency 1 *and* a
+  retry policy that holds the slot (see below). Otherwise a task waiting for
+  a retry or a defer (a defer waits in the process) frees the slot, and the
+  next message runs first. With higher concurrency messages of one partition
+  run in parallel and finish in any order; commits stay correct either way.
+  Delivery is at least once: after a crash or a rebalance, messages from the
+  last committed offset come again, including ones already handled.
 - **Ack point.** On completion: a crash redelivers unfinished tasks. On
   accept: offsets move early, so the queue needs a recovery hook that brings
   unfinished tasks back from your own records.
@@ -65,6 +73,28 @@ async fn main() -> Result<(), BoxError> {
   delays.
 - Pushes and deferred redelivery are not supported: producers write to the
   topic; a "defer" outcome waits in the process.
+
+A queue that keeps the order of each partition:
+
+```rust,no_run
+# use std::sync::Arc;
+# use taskcraft::{AckPoint, MetadataRegistry, Queue, RetryPolicy, task_fn};
+# use taskcraft_kafka::{KafkaJsonCodec, KafkaSource};
+# async fn apply(payment: String) {}
+# fn build() -> Result<(), Box<dyn std::error::Error>> {
+# let source = Arc::new(KafkaSource::builder("localhost:9092", "payments", "payment-workers").build()?);
+let queue = Queue::consumer("payments", source, KafkaJsonCodec::new(MetadataRegistry::new()), task_fn(apply))
+    .concurrency(1)
+    // A retry or a defer keeps the slot: the next message waits for it.
+    .retry_policy(RetryPolicy { max_attempts: 5, hold_slot: true, ..RetryPolicy::default() })
+    .ack_point(AckPoint::OnCompletion)
+    .build()?;
+# let _ = taskcraft::Monitor::new().register(queue)?;
+# Ok(()) }
+```
+
+Holding the slot stops the queue for the length of a pause: that is the
+price of the order.
 
 Defaults: `auto.offset.reset=earliest`, a poll waits up to 1 s for a message
 (`max_wait`).
