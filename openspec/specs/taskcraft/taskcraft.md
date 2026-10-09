@@ -1,6 +1,6 @@
 # Спецификация на taskcraft
 
-Версия спецификации - 0.38 (проект: спецификация задаёт целевое поведение первой версии; что уже реализовано — в таблице «Статус реализации», раздел 1.1)
+Версия спецификации - 0.39 (проект: спецификация задаёт целевое поведение первой версии; что уже реализовано — в таблице «Статус реализации», раздел 1.1)
 
 <!-- TOC -->
 * [1. Общие сведения](#1-общие-сведения)
@@ -1248,7 +1248,7 @@ tower), наблюдение, запускаемое, ошибки, тестов
 |----------|----------|
 | Минимальная поддерживаемая версия компилятора | 1.99 |
 | Редакция языка | 2024 |
-| Канал распространения | crates.io, пакеты `taskcraft`, `taskcraft-kafka`, `taskcraft-postgres` версии 0.2.2 (0.1.0 — первый выпуск; 0.1.1 — заявки `shutdown-drain-fixes`, `kafka-commit-errors`; 0.2.0 — заявки `benchmarks`, `worker-module-split`, `api-0.2`, руководство по миграции `MIGRATION.md`; 0.2.1 — заявки `delayed-push`, `failed-tasks`, `store-schema-and-indexes`, `store-orphan-release`, `store-notify-wakeup`; 0.2.2 — заявки `ci-quality-gates`, `concurrency-and-fuzz-tests`: исправление занятости пулов в событиях и метриках); README каждого пакета — его страница на crates.io, код README проверяется doc-тестами |
+| Канал распространения | crates.io, пакеты `taskcraft`, `taskcraft-kafka`, `taskcraft-postgres` версии 0.3.0 (0.1.0 — первый выпуск; 0.1.1 — заявки `shutdown-drain-fixes`, `kafka-commit-errors`; 0.2.0 — заявки `benchmarks`, `worker-module-split`, `api-0.2`, руководство по миграции `MIGRATION.md`; 0.2.1 — заявки `delayed-push`, `failed-tasks`, `store-schema-and-indexes`, `store-orphan-release`, `store-notify-wakeup`; 0.2.2 — заявки `ci-quality-gates`, `concurrency-and-fuzz-tests`: исправление занятости пулов в событиях и метриках; 0.3.0 — заявка `metrics-handle-cache`, несовместимое изменение `MetricsObserver`, раздел «0.2 → 0.3» в `MIGRATION.md`); README каждого пакета — его страница на crates.io, код README проверяется doc-тестами |
 | Репозиторий | https://github.com/Sebkd/taskcraft (зеркало) |
 | Лицензия | MIT |
 
