@@ -200,8 +200,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust (nightly)
-        uses: dtolnay/rust-toolchain@nightly
+      # The nightly pinned in fuzz/rust-toolchain.toml: a broken new nightly
+      # does not turn CI red.
+      - name: Install Rust (pinned nightly)
+        working-directory: fuzz
+        run: |
+          rustup toolchain install
+          echo "::notice::$(rustc --version)"
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2

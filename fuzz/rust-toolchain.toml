@@ -1,0 +1,6 @@
+# The nightly the fuzz targets build with, here and in CI (job "Fuzz
+# (short)" installs it from this file). Updated by hand: change the date,
+# and CI checks the new compiler.
+[toolchain]
+channel = "nightly-2026-10-07"
+profile = "minimal"
