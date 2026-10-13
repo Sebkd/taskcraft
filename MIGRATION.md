@@ -1,8 +1,19 @@
 # Migrating taskcraft
 
+- 0.3.2 → 0.3.3 (compatible API): the PostgreSQL store migrates its schema
+  to version 3 — roll out forward only, see below.
 - [0.2 → 0.3](#migrating-from-taskcraft-02-to-03): the `metrics` adapter.
 - [0.1 → 0.2](#migrating-from-taskcraft-01-to-02): handles, source traits,
   modules.
+
+# taskcraft 0.3.3: task store schema version 3
+
+No code changes. The first `taskcraft-postgres` 0.3.3 process to start
+migrates the schema to version 3: one index for `PgStore::tasks`, built on
+start — writes to the tasks table wait meanwhile, as with the indexes of
+0.2.1. From then on, processes of 0.3.2 or older refuse to start on that
+base (`SchemaTooNew`); those already running keep working. Roll out
+forward: do not restart old processes after the first new one started.
 
 # Migrating from taskcraft 0.2 to 0.3
 

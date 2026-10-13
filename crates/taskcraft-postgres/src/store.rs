@@ -7,15 +7,27 @@ use std::time::Duration;
 
 use sqlx::postgres::{PgListener, PgPoolOptions};
 use sqlx::{PgConnection, PgPool};
-use taskcraft::TaskId;
 use taskcraft::error::ConfigError;
 use taskcraft::source::{Notice, WakeHandle};
+use taskcraft::{TaskId, TaskState, TaskStatus};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::source::PgSource;
-use crate::sql::{CLEANUP_BATCH, MIGRATIONS, SCHEMA_LOCK};
+use crate::source::{PgSource, status_of};
+use crate::sql::{CLEANUP_BATCH, LIST_AFTER, LIST_FIRST, MIGRATIONS, SCHEMA_LOCK};
+
+/// A row of a listing: the id, then the columns of a status.
+type ListRow = (
+    String,
+    String,
+    i32,
+    i32,
+    Option<String>,
+    Option<String>,
+    Option<f64>,
+    Option<f64>,
+);
 
 /// What the store can fail with.
 #[derive(Debug, thiserror::Error)]
@@ -317,6 +329,65 @@ impl PgStore {
             return Err(PgStoreError::ProcessIdTaken(process_id.to_owned()));
         }
         release(shared, tx, process_id).await
+    }
+
+    /// The tasks of `queue` in `state`, by id: at most `limit` of them
+    /// (capped at 1000), after the id `after` — the last id of the previous
+    /// page, `None` for the first. Pages neither skip nor repeat a task
+    /// that stays in the state. For example, the failed tasks to
+    /// [requeue](taskcraft::QueueHandle::requeue):
+    ///
+    /// ```no_run
+    /// # async fn f(store: taskcraft_postgres::PgStore) -> Result<(), taskcraft_postgres::PgStoreError> {
+    /// use taskcraft::TaskState;
+    ///
+    /// let mut after = None;
+    /// loop {
+    ///     let page = store.tasks("billing", TaskState::Failed, after.as_ref(), 100).await?;
+    ///     for status in &page {
+    ///         println!("{} failed: {:?}", status.id(), status.reason());
+    ///     }
+    ///     match page.last() {
+    ///         Some(last) => after = Some(last.id().clone()),
+    ///         None => break,
+    ///     }
+    /// }
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`PgStoreError::Database`] when the database fails.
+    pub async fn tasks(
+        &self,
+        queue: &str,
+        state: TaskState,
+        after: Option<&TaskId>,
+        limit: u32,
+    ) -> Result<Vec<TaskStatus>, PgStoreError> {
+        let limit = i64::from(limit.min(1000));
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let query = match after {
+            None => sqlx::query_as(LIST_FIRST),
+            Some(_) => sqlx::query_as(LIST_AFTER),
+        };
+        let mut query = query.bind(queue).bind(state.as_str()).bind(limit);
+        if let Some(after) = after {
+            query = query.bind(after.as_str());
+        }
+        let rows: Vec<ListRow> = query.fetch_all(&self.shared.pool).await?;
+        rows.into_iter()
+            .map(
+                |(id, state, attempt, retries, reason, owner, created, next)| {
+                    status_of(
+                        TaskId::new(id),
+                        (state, attempt, retries, reason, owner, created, next),
+                    )
+                },
+            )
+            .collect()
     }
 
     /// Closes the store when the process stops (rule 2.3.19 p. 7): stops
