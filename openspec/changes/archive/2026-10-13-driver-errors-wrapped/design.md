@@ -2,7 +2,7 @@
 
 > **Change**: [change.md](change.md)
 >
-> **Статус**: Готово к реализации
+> **Статус**: Реализовано
 >
 > **Автор**: Андрей Серохвостов
 >
@@ -89,6 +89,12 @@ impl<T> OrDb<T> for Result<T, sqlx::Error> { … }
 ## Risks / Trade-offs
 
 - Пользователь, который сопоставлял поле `Database(sqlx::Error::RowNotFound)`, переходит на `downcast_ref`. Это и есть цель: такая зависимость теперь явная.
+
+## Найдено при реализации
+
+- `cargo semver-checks` (0.51) не замечает ни смены типа поля варианта, ни удаления `impl From<тип драйвера>`: с подъёмом и без он отвечает «no semver update required». Несовместимость обеспечивает подъём до 0.4.0 вручную (D-3), а не инструмент.
+- Первая версия обёртки Kafka (`Box<dyn Error + Send + Sync>`) лишала `KafkaSourceError` автотрейтов `UnwindSafe` и `RefUnwindSafe` — это инструмент заметил (`auto_trait_impl_removed`). Обёртка хранит `Box<dyn Error + Send + Sync + UnwindSafe + RefUnwindSafe>`, `Display` и `Error::source` написаны вручную (`thiserror` такой тип в `#[source]` не принимает). `sqlx::Error` этих автотрейтов не имеет, поэтому у PostgreSQL ничего не теряется.
+- `#[error(transparent)]` у обёртки перенаправлял бы `source()` на причину ошибки драйвера, а не на неё саму. Обёртка — `#[error("{0}")]` с `#[source]`; вариант `Database` — `transparent`, поэтому `source()` самого `PgStoreError` даёт ошибку драйвера.
 
 ## Open Questions
 

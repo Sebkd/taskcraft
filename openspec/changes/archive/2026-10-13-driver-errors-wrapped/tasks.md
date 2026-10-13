@@ -4,7 +4,7 @@
 >
 > **Design**: [design.md](design.md)
 >
-> **Статус**: В реализации
+> **Статус**: Архивировано
 >
 > **Автор**: Андрей Серохвостов
 >
@@ -14,26 +14,26 @@
 
 ## 1. PostgreSQL
 
-- [ ] 1.1 `DatabaseError`, `PgStoreError::Database(DatabaseError)` без `#[from]` (D-1)
-- [ ] 1.2 Приватный `.db()` вместо `?` из `sqlx::Error` (D-2)
+- [x] 1.1 `DatabaseError`, `PgStoreError::Database(DatabaseError)` без `#[from]` (D-1)
+- [x] 1.2 Приватный `.db()` вместо `?` из `sqlx::Error` (D-2)
 
 ## 2. Kafka
 
-- [ ] 2.1 `KafkaClientError`, `KafkaSourceError::Client(KafkaClientError)` без `#[from]`; `.client()` (D-1, D-2)
+- [x] 2.1 `KafkaClientError`, `KafkaSourceError::Client(KafkaClientError)` без `#[from]`; `.client()` (D-1, D-2)
 
 ## 3. Тесты и документация
 
-- [ ] 3.1 Модульные тесты обёрток (D-5)
-- [ ] 3.2 `MIGRATION.md`, раздел «0.3 → 0.4» (D-4)
-- [ ] 3.3 Версия 0.4.0: рабочее пространство, зависимости пакетов, lock-файлы (D-3)
+- [x] 3.1 Модульные тесты обёрток (D-5)
+- [x] 3.2 `MIGRATION.md`, раздел «0.3 → 0.4» (D-4)
+- [x] 3.3 Версия 0.4.0: рабочее пространство, зависимости пакетов, lock-файлы (D-3)
 
 ## 4. Спецификация
 
-- [ ] 4.1 2.11, критерии №101–102, таблица статусов, версия спецификации
+- [x] 4.1 2.11, критерии №101–102, таблица статусов, версия спецификации
 
 ## 5. Финализация
 
-- [ ] 5.1 Локально: fmt, clippy, test с сервисами, doc, readme-check, `semver-checks`, примеры; CI зелёный
+- [x] 5.1 Локально: fmt, clippy, test с сервисами, doc, readme-check, `semver-checks`, примеры; CI зелёный
 
 ---
 

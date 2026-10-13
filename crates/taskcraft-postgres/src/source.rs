@@ -12,7 +12,7 @@ use taskcraft::{FinishReason, TaskId, TaskState, TaskStatus};
 use tokio::time::Instant;
 
 use crate::sql::{CLAIM_DUE, CLAIM_EXPIRED};
-use crate::store::{Held, PgStoreError, Shared, announce, lock};
+use crate::store::{Held, OrDb, PgStoreError, Shared, announce, db_error, lock};
 
 /// Identifies a task this process took from the store.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -86,7 +86,7 @@ impl PgSource {
         .bind(next)
         .execute(&self.shared.pool)
         .await
-        .map_err(|e| PushError::Source(e.into()))?
+        .map_err(|e| PushError::Source(db_error(e)))?
         .rows_affected();
         if inserted == 1 {
             // A held-back task gives this process nothing to do yet.
@@ -102,7 +102,7 @@ impl PgSource {
                 .bind(id.as_str())
                 .fetch_optional(&self.shared.pool)
                 .await
-                .map_err(|e| PushError::Source(e.into()))?;
+                .map_err(|e| PushError::Source(db_error(e)))?;
         match state
             .as_deref()
             .map(parse_state)
@@ -127,7 +127,8 @@ impl PgSource {
             .bind(lease.is_some())
             .bind(lease.map_or(0.0, |l| l.duration.as_secs_f64()))
             .fetch_optional(&self.shared.pool)
-            .await?;
+            .await
+            .db()?;
         Ok(row)
     }
 
@@ -225,7 +226,8 @@ impl TaskStore for PgSource {
         .bind(completion.state.as_str())
         .bind(reason.map(|r| r.to_string()))
         .execute(&self.shared.pool)
-        .await?;
+        .await
+        .db()?;
         self.release(&receipt.id);
         Ok(())
     }
@@ -243,7 +245,8 @@ impl TaskStore for PgSource {
         .bind(count(progress.attempt))
         .bind(count(progress.retries))
         .execute(&self.shared.pool)
-        .await?;
+        .await
+        .db()?;
         Ok(())
     }
 
@@ -302,7 +305,7 @@ impl TaskStore for PgSource {
         .bind(delay.as_secs_f64())
         .execute(&self.shared.pool)
         .await
-        .map_err(|e| DeferError::Source(e.into()))?;
+        .map_err(|e| DeferError::Source(db_error(e)))?;
         self.release(&receipt.id);
         Ok(())
     }
@@ -321,7 +324,8 @@ impl TaskStore for PgSource {
         .bind(id.as_str())
         .bind(reason.to_string())
         .execute(&self.shared.pool)
-        .await?
+        .await
+        .db()?
         .rows_affected();
         if cancelled == 1 {
             return Ok(Withdrawal::Removed);
@@ -333,7 +337,8 @@ impl TaskStore for PgSource {
         .bind(&*self.queue)
         .bind(id.as_str())
         .execute(&self.shared.pool)
-        .await?
+        .await
+        .db()?
         .rows_affected();
         if requested == 1 {
             return Ok(Withdrawal::CancelRequested);
@@ -342,7 +347,7 @@ impl TaskStore for PgSource {
         .bind(&*self.queue)
         .bind(id.as_str())
         .fetch_optional(&self.shared.pool)
-        .await?;
+        .await.db()?;
         Ok(if finished == Some(true) {
             Withdrawal::Finished
         } else {
@@ -364,7 +369,8 @@ impl TaskStore for PgSource {
         .bind(&*self.queue)
         .bind(id.as_str())
         .execute(&self.shared.pool)
-        .await?
+        .await
+        .db()?
         .rows_affected();
         if requeued == 1 {
             self.shared.wake(&self.queue);
@@ -376,7 +382,8 @@ impl TaskStore for PgSource {
                 .bind(&*self.queue)
                 .bind(id.as_str())
                 .fetch_optional(&self.shared.pool)
-                .await?;
+                .await
+                .db()?;
         Ok(match state.as_deref().map(parse_state).transpose()? {
             Some(state) => Requeue::NotFailed(state),
             None => Requeue::NotFound,
@@ -393,7 +400,8 @@ impl TaskStore for PgSource {
         .bind(&*self.queue)
         .bind(id.as_str())
         .fetch_optional(&self.shared.pool)
-        .await?;
+        .await
+        .db()?;
         row.map(|row| status_of(id.clone(), row)).transpose()
     }
 }

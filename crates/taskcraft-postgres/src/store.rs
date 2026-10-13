@@ -38,7 +38,7 @@ pub enum PgStoreError {
     Config(#[from] ConfigError),
     /// The database failed or is unreachable.
     #[error(transparent)]
-    Database(#[from] sqlx::Error),
+    Database(DatabaseError),
     /// The cleanup batch is zero.
     #[error("cleanup batch must be at least 1")]
     InvalidCleanupBatch,
@@ -60,6 +60,46 @@ pub enum PgStoreError {
         /// The newest version this library knows.
         supported: i32,
     },
+}
+
+/// A failure of the database driver. Its cause — the driver's own error —
+/// is reachable through [`source`](std::error::Error::source); its type is
+/// not part of this API, so a driver update does not change it:
+///
+/// ```no_run
+/// # fn f(error: taskcraft_postgres::PgStoreError) {
+/// use std::error::Error as _;
+///
+/// if let Some(sqlx::Error::PoolTimedOut) = error.source().and_then(|e| e.downcast_ref()) {
+///     // the pool is exhausted
+/// }
+/// # }
+/// ```
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct DatabaseError(#[source] Box<dyn std::error::Error + Send + Sync>);
+
+impl From<DatabaseError> for PgStoreError {
+    fn from(error: DatabaseError) -> Self {
+        Self::Database(error)
+    }
+}
+
+/// Turns a driver result into the store's: the driver's error becomes the
+/// cause of [`PgStoreError::Database`].
+pub(crate) trait OrDb<T> {
+    fn db(self) -> Result<T, PgStoreError>;
+}
+
+impl<T> OrDb<T> for Result<T, sqlx::Error> {
+    fn db(self) -> Result<T, PgStoreError> {
+        self.map_err(db_error)
+    }
+}
+
+/// The driver's error as the cause of [`PgStoreError::Database`].
+pub(crate) fn db_error(error: sqlx::Error) -> PgStoreError {
+    PgStoreError::Database(DatabaseError(Box::new(error)))
 }
 
 /// Leases: any process may take a task whose owner stopped renewing it
@@ -193,7 +233,7 @@ impl PgStoreBuilder {
     /// As [`with_pool`](Self::with_pool), and the connection failing.
     pub async fn connect(self, url: &str) -> Result<PgStore, PgStoreError> {
         self.validate()?;
-        let pool = PgPoolOptions::new().connect(url).await?;
+        let pool = PgPoolOptions::new().connect(url).await.db()?;
         self.with_pool(pool).await
     }
 
@@ -218,9 +258,13 @@ impl PgStoreBuilder {
         self.validate()?;
         migrate(&pool).await?;
         claim_process_id(&pool, &self.process_id, self.alive_interval).await?;
-        give_back(&pool, &self.process_id, self.notifications).await?;
+        give_back(&pool, &self.process_id, self.notifications)
+            .await
+            .db()?;
         if self.lease.is_none() {
-            warn_stale_owners(&pool, &self.process_id, self.stale_owner_warning).await?;
+            warn_stale_owners(&pool, &self.process_id, self.stale_owner_warning)
+                .await
+                .db()?;
         }
         let shared = Arc::new(Shared {
             pool,
@@ -239,8 +283,8 @@ impl PgStoreBuilder {
         });
         let mut tasks = vec![tokio::spawn(upkeep(Arc::downgrade(&shared), tick))];
         if self.notifications {
-            let mut listener = PgListener::connect_with(&shared.pool).await?;
-            listener.listen(CHANNEL).await?;
+            let mut listener = PgListener::connect_with(&shared.pool).await.db()?;
+            listener.listen(CHANNEL).await.db()?;
             tasks.push(tokio::spawn(listen(Arc::downgrade(&shared), listener)));
         }
         *lock(&shared.upkeep) = tasks;
@@ -324,8 +368,11 @@ impl PgStore {
         if process_id == shared.process_id {
             return Err(PgStoreError::ProcessIdTaken(process_id.to_owned()));
         }
-        let mut tx = shared.pool.begin().await?;
-        if alive(&mut tx, process_id, shared.alive_interval).await? {
+        let mut tx = shared.pool.begin().await.db()?;
+        if alive(&mut tx, process_id, shared.alive_interval)
+            .await
+            .db()?
+        {
             return Err(PgStoreError::ProcessIdTaken(process_id.to_owned()));
         }
         release(shared, tx, process_id).await
@@ -377,7 +424,7 @@ impl PgStore {
         if let Some(after) = after {
             query = query.bind(after.as_str());
         }
-        let rows: Vec<ListRow> = query.fetch_all(&self.shared.pool).await?;
+        let rows: Vec<ListRow> = query.fetch_all(&self.shared.pool).await.db()?;
         rows.into_iter()
             .map(
                 |(id, state, attempt, retries, reason, owner, created, next)| {
@@ -413,15 +460,17 @@ impl PgStore {
         for handle in lock(&shared.upkeep).drain(..) {
             handle.abort();
         }
-        let mut tx = shared.pool.begin().await?;
+        let mut tx = shared.pool.begin().await.db()?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
             .bind(&shared.process_id)
             .execute(&mut *tx)
-            .await?;
+            .await
+            .db()?;
         sqlx::query("DELETE FROM taskcraft_processes WHERE id = $1")
             .bind(&shared.process_id)
             .execute(&mut *tx)
-            .await?;
+            .await
+            .db()?;
         release(shared, tx, &shared.process_id).await
     }
 }
@@ -433,8 +482,8 @@ async fn release(
     mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
     owner: &str,
 ) -> Result<u64, PgStoreError> {
-    let queues = return_tasks(&mut tx, owner).await?;
-    tx.commit().await?;
+    let queues = return_tasks(&mut tx, owner).await.db()?;
+    tx.commit().await.db()?;
     for (queue, _) in &queues {
         announce(shared, queue).await;
     }
@@ -541,17 +590,20 @@ fn supported_version() -> i32 {
 /// of 0.1 or 0.2 has no version table and counts as version 0, its tables as
 /// version 1.
 async fn migrate(pool: &PgPool) -> Result<(), PgStoreError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin().await.db()?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(SCHEMA_LOCK)
         .execute(&mut *tx)
-        .await?;
+        .await
+        .db()?;
     sqlx::raw_sql("CREATE TABLE IF NOT EXISTS taskcraft_schema (version integer NOT NULL)")
         .execute(&mut *tx)
-        .await?;
+        .await
+        .db()?;
     let found: Option<i32> = sqlx::query_scalar("SELECT max(version) FROM taskcraft_schema")
         .fetch_one(&mut *tx)
-        .await?;
+        .await
+        .db()?;
     let found = found.unwrap_or(0);
     let supported = supported_version();
     if found > supported {
@@ -559,16 +611,18 @@ async fn migrate(pool: &PgPool) -> Result<(), PgStoreError> {
     }
     let done = usize::try_from(found).unwrap_or(0);
     for migration in MIGRATIONS.iter().skip(done) {
-        sqlx::raw_sql(*migration).execute(&mut *tx).await?;
+        sqlx::raw_sql(*migration).execute(&mut *tx).await.db()?;
     }
     if found < supported {
         sqlx::query("DELETE FROM taskcraft_schema")
             .execute(&mut *tx)
-            .await?;
+            .await
+            .db()?;
         sqlx::query("INSERT INTO taskcraft_schema (version) VALUES ($1)")
             .bind(supported)
             .execute(&mut *tx)
-            .await?;
+            .await
+            .db()?;
         info!(
             event = "store",
             action = "migrated",
@@ -577,7 +631,7 @@ async fn migrate(pool: &PgPool) -> Result<(), PgStoreError> {
             supported
         );
     }
-    tx.commit().await?;
+    tx.commit().await.db()?;
     Ok(())
 }
 
@@ -588,8 +642,8 @@ async fn claim_process_id(
     process_id: &str,
     alive_interval: Duration,
 ) -> Result<(), PgStoreError> {
-    let mut tx = pool.begin().await?;
-    if alive(&mut tx, process_id, alive_interval).await? {
+    let mut tx = pool.begin().await.db()?;
+    if alive(&mut tx, process_id, alive_interval).await.db()? {
         return Err(PgStoreError::ProcessIdTaken(process_id.to_owned()));
     }
     sqlx::query(
@@ -598,8 +652,9 @@ async fn claim_process_id(
     )
     .bind(process_id)
     .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
+    .await
+    .db()?;
+    tx.commit().await.db()?;
     Ok(())
 }
 
@@ -876,6 +931,23 @@ fn report(held: &Held, ids: &[String], rows: &[(String, bool)], leases: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Change driver-errors-wrapped: the driver's error is the cause, with
+    /// its own message; the type is reached by downcasting.
+    #[test]
+    fn database_error_keeps_the_driver_error_as_its_cause() {
+        use std::error::Error as _;
+
+        let error = Err::<(), _>(sqlx::Error::PoolTimedOut).db().unwrap_err();
+        assert_eq!(error.to_string(), sqlx::Error::PoolTimedOut.to_string());
+        assert!(matches!(error, PgStoreError::Database(_)), "{error:?}");
+        // The store's error leads to the driver's: no need to unwrap the variant.
+        let cause = error.source().and_then(|e| e.downcast_ref::<sqlx::Error>());
+        assert!(
+            matches!(cause, Some(sqlx::Error::PoolTimedOut)),
+            "{cause:?}"
+        );
+    }
 
     fn builder() -> PgStoreBuilder {
         PgStore::builder("p")

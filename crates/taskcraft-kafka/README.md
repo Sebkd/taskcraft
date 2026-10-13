@@ -8,8 +8,8 @@ reads one topic as a member of a consumer group.
 
 ```toml
 [dependencies]
-taskcraft = "0.3"
-taskcraft-kafka = "0.3"
+taskcraft = "0.4"
+taskcraft-kafka = "0.4"
 ```
 
 ```rust,no_run

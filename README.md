@@ -29,7 +29,7 @@ restart and can be asked about — and stopped — by id.
 
 ```toml
 [dependencies]
-taskcraft = "0.3"
+taskcraft = "0.4"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
