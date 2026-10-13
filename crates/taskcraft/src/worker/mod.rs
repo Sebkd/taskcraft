@@ -19,7 +19,7 @@ use tracing::info;
 use self::drain::stop_worker;
 use self::intake::Intake;
 use self::notices::spawn_listener;
-pub(crate) use self::pools::PoolClaim;
+pub(crate) use self::pools::{Gauge, PoolClaim};
 use crate::backend::Backend;
 use crate::codec::Codec;
 use crate::handler::{SharedData, TaskRequest};
