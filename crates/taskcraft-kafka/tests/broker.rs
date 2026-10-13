@@ -8,8 +8,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
@@ -41,6 +42,43 @@ fn brokers() -> Option<String> {
         eprintln!("TASKCRAFT_KAFKA_BROKERS is not set: skipped");
     }
     brokers
+}
+
+/// Every log record of this test binary, from any thread: the client's
+/// callbacks run on its own threads. Installed once, globally.
+fn logs() -> &'static Mutex<Vec<u8>> {
+    static LOGS: OnceLock<&'static Mutex<Vec<u8>>> = OnceLock::new();
+    LOGS.get_or_init(|| {
+        let logs: &'static Mutex<Vec<u8>> = Box::leak(Box::default());
+        let _ = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || Appender(logs))
+            .try_init();
+        logs
+    })
+}
+
+struct Appender(&'static Mutex<Vec<u8>>);
+
+impl Write for Appender {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The logged lines that contain `needle`.
+fn logged(needle: &str) -> Vec<String> {
+    let logs = logs().lock().unwrap();
+    String::from_utf8_lossy(&logs)
+        .lines()
+        .filter(|l| l.contains(needle))
+        .map(str::to_owned)
+        .collect()
 }
 
 async fn until(limit: Duration, cond: impl Fn() -> bool) -> bool {
@@ -206,6 +244,7 @@ fn spawn(
 #[tokio::test(flavor = "multi_thread")]
 async fn tasks_run_and_offsets_are_committed() {
     let Some(brokers) = brokers() else { return };
+    let _ = logs();
     let topic = create_topic(&brokers, 1).await;
     produce(&brokers, &topic, (0..5).map(|n| (format!("job-{n}"), n))).await;
     let seen = Seen::default();
@@ -215,10 +254,16 @@ async fn tasks_run_and_offsets_are_committed() {
     let mut ids: Vec<_> = seen.lock().unwrap().iter().map(|s| s.0.clone()).collect();
     ids.sort();
     assert_eq!(ids, ["job-0", "job-1", "job-2", "job-3", "job-4"]);
+    // On a fresh broker the group coordinator may refuse the first commits:
+    // the source sends them again (change kafka-commit-retry). If it still
+    // fails, the message says what the broker answered.
     assert!(
         until(30 * SEC, || committed(&brokers, &topic, "group-a")
             == Some(5))
-        .await
+        .await,
+        "offset 5 not committed: committed={:?}, commit failures={:?}",
+        committed(&brokers, &topic, "group-a"),
+        logged("commit failed")
     );
     stop.cancel();
     run.await.unwrap();

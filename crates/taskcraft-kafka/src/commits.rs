@@ -4,6 +4,7 @@
 //! rebalances, and commits what it answers.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use taskcraft::source::OffsetTracker;
 
@@ -30,11 +31,17 @@ impl KafkaReceipt {
     }
 }
 
+/// How long after a failed commit the boundary goes out again without a new
+/// ack (change kafka-commit-retry).
+pub(crate) const RETRY_PAUSE: Duration = Duration::from_secs(1);
+
 #[derive(Debug)]
 struct Partition {
     assignment: u64,
     tracker: OffsetTracker,
     committed: Option<i64>,
+    /// When a failed boundary may go out again; set on a failure.
+    retry_at: Option<Instant>,
 }
 
 /// Offsets in flight per partition of the current assignment.
@@ -55,6 +62,7 @@ impl Commits {
                 assignment: *assignments,
                 tracker: OffsetTracker::new(),
                 committed: None,
+                retry_at: None,
             }
         });
         entry.tracker.delivered(offset);
@@ -79,18 +87,39 @@ impl Commits {
             return None;
         }
         partition.committed = Some(point);
+        partition.retry_at = None;
         Some(point + 1)
     }
 
-    /// A commit up to `next` (the next offset to read) failed: unless a later
-    /// commit already went out, the partition commits its boundary again on
-    /// its next ack.
-    pub(crate) fn commit_failed(&mut self, partition: i32, next: i64) {
+    /// A commit up to `next` (the next offset to read) failed at `now`:
+    /// unless a later commit already went out, the partition commits its
+    /// boundary again on its next ack, or on [`retry`](Self::retry) after
+    /// [`RETRY_PAUSE`] — whichever comes first.
+    pub(crate) fn commit_failed(&mut self, partition: i32, next: i64, now: Instant) {
         if let Some(entry) = self.partitions.get_mut(&partition)
             && entry.committed == Some(next - 1)
         {
             entry.committed = None;
+            entry.retry_at = Some(now + RETRY_PAUSE);
         }
+    }
+
+    /// The boundaries whose commit failed and whose pause is over at `now`,
+    /// as (partition, next offset to read); each counts as sent again.
+    pub(crate) fn retry(&mut self, now: Instant) -> Vec<(i32, i64)> {
+        let mut due = Vec::new();
+        for (&partition, entry) in &mut self.partitions {
+            if entry.committed.is_some() || entry.retry_at.is_none_or(|at| at > now) {
+                continue;
+            }
+            let Some(point) = entry.tracker.commit_point() else {
+                continue;
+            };
+            entry.committed = Some(point);
+            entry.retry_at = None;
+            due.push((partition, point + 1));
+        }
+        due
     }
 
     /// Forgets revoked partitions: their deliveries in flight no longer
@@ -136,14 +165,59 @@ mod tests {
         let first = commits.delivered(0, 1);
         let second = commits.delivered(0, 2);
         assert_eq!(commits.acked(first), Some(2));
-        commits.commit_failed(0, 2);
+        commits.commit_failed(0, 2, Instant::now());
         assert_eq!(commits.acked(second), Some(3), "boundary sent again");
 
         // An older failure does not undo a newer commit.
-        commits.commit_failed(0, 2);
+        commits.commit_failed(0, 2, Instant::now());
         let third = commits.delivered(0, 3);
         assert_eq!(commits.acked(third), Some(4));
-        commits.commit_failed(7, 1); // unknown partition: nothing happens
+        commits.commit_failed(7, 1, Instant::now()); // unknown partition: nothing happens
+    }
+
+    /// Change kafka-commit-retry, criterion 1: the last boundary of a
+    /// partition failed and no ack follows; it goes out again after the
+    /// pause, once.
+    #[test]
+    fn failed_last_boundary_is_retried_without_an_ack() {
+        let mut commits = Commits::default();
+        let only = commits.delivered(0, 1);
+        assert_eq!(commits.acked(only), Some(2));
+        let failed = Instant::now();
+        commits.commit_failed(0, 2, failed);
+        assert_eq!(commits.retry(failed), [], "not before the pause");
+        assert_eq!(commits.retry(failed + RETRY_PAUSE), [(0, 2)]);
+        assert_eq!(commits.retry(failed + 2 * RETRY_PAUSE), [], "sent once");
+
+        // Failed again: retried again.
+        let again = failed + 3 * RETRY_PAUSE;
+        commits.commit_failed(0, 2, again);
+        assert_eq!(commits.retry(again + RETRY_PAUSE), [(0, 2)]);
+    }
+
+    /// Change kafka-commit-retry, criterion 2: a later boundary committed by
+    /// an ack replaces the failed one.
+    #[test]
+    fn a_later_commit_replaces_the_retry() {
+        let mut commits = Commits::default();
+        let first = commits.delivered(0, 1);
+        let second = commits.delivered(0, 2);
+        assert_eq!(commits.acked(first), Some(2));
+        let failed = Instant::now();
+        commits.commit_failed(0, 2, failed);
+        assert_eq!(commits.acked(second), Some(3));
+        assert_eq!(commits.retry(failed + RETRY_PAUSE), []);
+    }
+
+    #[test]
+    fn a_revoked_partition_is_not_retried() {
+        let mut commits = Commits::default();
+        let only = commits.delivered(0, 1);
+        assert_eq!(commits.acked(only), Some(2));
+        let failed = Instant::now();
+        commits.commit_failed(0, 2, failed);
+        commits.revoke([0]);
+        assert_eq!(commits.retry(failed + RETRY_PAUSE), []);
     }
 
     #[test]
