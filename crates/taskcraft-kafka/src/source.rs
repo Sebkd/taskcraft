@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -32,10 +33,49 @@ pub enum KafkaSourceError {
     Config(#[from] ConfigError),
     /// The client failed: creating the consumer, reading or committing.
     #[error(transparent)]
-    Client(#[from] KafkaError),
+    Client(KafkaClientError),
     /// No broker is reachable, or the client hit a fatal error.
     #[error("broker unavailable: {0}")]
     Broker(String),
+}
+
+/// A failure of the Kafka client. Its cause — the client's own error — is
+/// reachable through [`source`](std::error::Error::source); its type is not
+/// part of this API, so a client update does not change it.
+#[derive(Debug)]
+pub struct KafkaClientError(
+    // Unwind-safe like the client's error it replaces in 0.3.
+    Box<dyn std::error::Error + Send + Sync + UnwindSafe + RefUnwindSafe>,
+);
+
+impl fmt::Display for KafkaClientError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for KafkaClientError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&*self.0)
+    }
+}
+
+impl From<KafkaClientError> for KafkaSourceError {
+    fn from(error: KafkaClientError) -> Self {
+        Self::Client(error)
+    }
+}
+
+/// Turns a client result into the source's: the client's error becomes the
+/// cause of [`KafkaSourceError::Client`].
+trait OrClient<T> {
+    fn client(self) -> Result<T, KafkaSourceError>;
+}
+
+impl<T> OrClient<T> for Result<T, KafkaError> {
+    fn client(self) -> Result<T, KafkaSourceError> {
+        self.map_err(|error| KafkaSourceError::Client(KafkaClientError(Box::new(error))))
+    }
 }
 
 /// Derives a task id from a message (spec 2.6). The message's own
@@ -197,9 +237,11 @@ impl KafkaSourceBuilder {
             failure: Arc::clone(&failure),
             notify,
         };
-        let consumer: StreamConsumer<Callbacks> =
-            self.client_config().create_with_context(callbacks)?;
-        consumer.subscribe(&[&self.topic])?;
+        let consumer: StreamConsumer<Callbacks> = self
+            .client_config()
+            .create_with_context(callbacks)
+            .client()?;
+        consumer.subscribe(&[&self.topic]).client()?;
         Ok(KafkaSource {
             consumer,
             topic: self.topic,
@@ -302,9 +344,11 @@ impl KafkaSource {
         }
         let mut offsets = TopicPartitionList::new();
         for (partition, next) in due {
-            offsets.add_partition_offset(&self.topic, partition, Offset::Offset(next))?;
+            offsets
+                .add_partition_offset(&self.topic, partition, Offset::Offset(next))
+                .client()?;
         }
-        self.consumer.commit(&offsets, CommitMode::Async)?;
+        self.consumer.commit(&offsets, CommitMode::Async).client()?;
         Ok(())
     }
 }
@@ -328,7 +372,7 @@ impl Source for KafkaSource {
             self.wake.wake();
             return Ok(Polled::Empty);
         };
-        let received = received?;
+        let received = received.client()?;
         let headers = received
             .headers()
             .map(|headers| {
@@ -370,8 +414,10 @@ impl Source for KafkaSource {
             return Ok(());
         };
         let mut offsets = TopicPartitionList::new();
-        offsets.add_partition_offset(&self.topic, receipt.partition, Offset::Offset(next))?;
-        self.consumer.commit(&offsets, CommitMode::Async)?;
+        offsets
+            .add_partition_offset(&self.topic, receipt.partition, Offset::Offset(next))
+            .client()?;
+        self.consumer.commit(&offsets, CommitMode::Async).client()?;
         Ok(())
     }
 
@@ -387,6 +433,19 @@ impl Source for KafkaSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Change driver-errors-wrapped: the client's error is the cause, with
+    /// its own message; the type is reached by downcasting.
+    #[test]
+    fn client_error_keeps_the_client_error_as_its_cause() {
+        use std::error::Error as _;
+
+        let original = KafkaError::Canceled;
+        let error = Err::<(), _>(KafkaError::Canceled).client().unwrap_err();
+        assert_eq!(error.to_string(), original.to_string());
+        let cause = error.source().and_then(|e| e.downcast_ref::<KafkaError>());
+        assert!(matches!(cause, Some(KafkaError::Canceled)), "{cause:?}");
+    }
 
     /// Change criterion 1: auto commit stays off whatever the consumer sets.
     #[test]

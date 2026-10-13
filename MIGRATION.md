@@ -1,10 +1,39 @@
 # Migrating taskcraft
 
+- [0.3 → 0.4](#migrating-from-taskcraft-03-to-04): errors of the Kafka
+  source and the PostgreSQL store no longer expose driver types.
 - 0.3.2 → 0.3.3 (compatible API): the PostgreSQL store migrates its schema
   to version 3 — roll out forward only, see below.
 - [0.2 → 0.3](#migrating-from-taskcraft-02-to-03): the `metrics` adapter.
 - [0.1 → 0.2](#migrating-from-taskcraft-01-to-02): handles, source traits,
   modules.
+
+# Migrating from taskcraft 0.3 to 0.4
+
+## Driver errors are causes, not variants' types
+
+`PgStoreError::Database` held a `sqlx::Error`, and `KafkaSourceError::Client`
+an `rdkafka` `KafkaError`: a major update of either driver changed the API of
+these crates. Now they hold `DatabaseError` and `KafkaClientError`, whose
+messages are the drivers' and whose cause is the driver's error. Matching
+the variant does not change; code that looked inside reaches the driver's
+error through `source()`:
+
+```rust,ignore
+// 0.3
+if let Err(PgStoreError::Database(sqlx::Error::PoolTimedOut)) = result { … }
+
+// 0.4
+use std::error::Error as _;
+if let Err(error) = &result
+    && let Some(sqlx::Error::PoolTimedOut) = error.source().and_then(|e| e.downcast_ref())
+{ … }
+```
+
+`PgStoreError` and `KafkaSourceError` no longer convert from the drivers'
+errors (`From<sqlx::Error>`, `From<KafkaError>`): code that built them with
+`?` from a driver result wraps the error itself. The pool shared with the
+store stays a `sqlx::PgPool`: `taskcraft-postgres` follows `sqlx` majors.
 
 # taskcraft 0.3.3: task store schema version 3
 

@@ -9,8 +9,8 @@ restarts, and with leases hand a crashed process's tasks to another one.
 
 ```toml
 [dependencies]
-taskcraft = "0.3"
-taskcraft-postgres = "0.3"
+taskcraft = "0.4"
+taskcraft-postgres = "0.4"
 ```
 
 ```rust,no_run
