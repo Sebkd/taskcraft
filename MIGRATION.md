@@ -1,7 +1,8 @@
 # Migrating taskcraft
 
 - [0.3 → 0.4](#migrating-from-taskcraft-03-to-04): errors of the Kafka
-  source and the PostgreSQL store no longer expose driver types.
+  source and the PostgreSQL store no longer expose driver types; queue
+  constructors tie the service to the arguments.
 - 0.3.2 → 0.3.3 (compatible API): the PostgreSQL store migrates its schema
   to version 3 — roll out forward only, see below.
 - [0.2 → 0.3](#migrating-from-taskcraft-02-to-03): the `metrics` adapter.
@@ -34,6 +35,23 @@ if let Err(error) = &result
 errors (`From<sqlx::Error>`, `From<KafkaError>`): code that built them with
 `?` from a driver result wraps the error itself. The pool shared with the
 store stays a `sqlx::PgPool`: `taskcraft-postgres` follows `sqlx` majors.
+
+## Queue constructors know the arguments from the service
+
+`Queue::builder`, `Queue::consumer` and `Queue::on_store` now require
+`Svc: tower::Service<TaskRequest<Args>>` — the bound `Monitor::register`
+always had. A queue on `task_fn` builds without a type annotation and
+without `register` in the same function. A generic wrapper over a
+constructor adds the bound:
+
+```rust,ignore
+fn queue_of<Svc>(source: Arc<Src>, service: Svc) -> QueueBuilder<Pushed<Src>, Codec, Svc, u32>
+where
+    Svc: tower::Service<taskcraft::handler::TaskRequest<u32>>,
+{
+    Queue::builder("q", source, Codec::new(), service)
+}
+```
 
 # taskcraft 0.3.3: task store schema version 3
 

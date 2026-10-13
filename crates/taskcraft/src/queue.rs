@@ -11,7 +11,7 @@ use std::time::Duration;
 use crate::backend::Backend;
 use crate::codec::{Codec, CodecError, JsonCodec};
 use crate::error::ConfigError;
-use crate::handler::{BoxFuture, SharedData};
+use crate::handler::{BoxFuture, SharedData, TaskRequest};
 use crate::metadata::MetadataRegistry;
 use crate::observe::ObserverCell;
 use crate::outcome::BoxError;
@@ -148,12 +148,35 @@ impl<S: PushSource, C: Codec<Args, S::Message>, Svc, Args> Queue<Pushed<S>, C, S
     /// pushed into, such as the [`InMemorySource`](crate::InMemorySource):
     /// it decodes them with `codec` and runs them with `service` (usually
     /// built with [`task_fn`](crate::task_fn)). Its handle pushes.
+    ///
+    /// The arguments' type comes from the service: no annotation, and no
+    /// [`register`](crate::Monitor::register) is needed to build it.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use taskcraft::codec::IdentityCodec;
+    /// use taskcraft::{InMemorySource, Queue, task_fn};
+    ///
+    /// let queue = Queue::builder(
+    ///     "reports",
+    ///     Arc::new(InMemorySource::default()),
+    ///     IdentityCodec::new(),
+    ///     task_fn(|month: u32| async move { let _ = month; }),
+    /// )
+    /// .no_recovery()
+    /// .build()?;
+    /// # let _ = queue;
+    /// # Ok::<(), taskcraft::error::ConfigError>(())
+    /// ```
     pub fn builder(
         name: impl Into<String>,
         source: Arc<S>,
         codec: C,
         service: Svc,
-    ) -> QueueBuilder<Pushed<S>, C, Svc, Args> {
+    ) -> QueueBuilder<Pushed<S>, C, Svc, Args>
+    where
+        Svc: tower::Service<TaskRequest<Args>>,
+    {
         QueueBuilder::new(name.into(), Pushed(source), codec, service, None)
     }
 }
@@ -167,7 +190,10 @@ impl<S: Source, C: Codec<Args, S::Message>, Svc, Args> Queue<Consumed<S>, C, Svc
         source: Arc<S>,
         codec: C,
         service: Svc,
-    ) -> QueueBuilder<Consumed<S>, C, Svc, Args> {
+    ) -> QueueBuilder<Consumed<S>, C, Svc, Args>
+    where
+        Svc: tower::Service<TaskRequest<Args>>,
+    {
         QueueBuilder::new(name.into(), Consumed(source), codec, service, None)
     }
 }
@@ -181,6 +207,22 @@ where
     /// and names metadata through the queue's
     /// [metadata registry](QueueBuilder::metadata_registry). Its handle
     /// pushes.
+    ///
+    /// The arguments' type comes from the service, as with
+    /// [`builder`](Queue::builder):
+    ///
+    /// ```
+    /// # fn f<S: taskcraft::source::TaskStore>(store: std::sync::Arc<S>) -> Result<(), taskcraft::error::ConfigError> {
+    /// let queue = taskcraft::Queue::on_store(
+    ///     "billing",
+    ///     store,
+    ///     taskcraft::task_fn(|amount: u64| async move { let _ = amount; }),
+    /// )
+    /// .build()?;
+    /// # let _ = queue;
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// A store is neither a stream nor a plain push source, so it cannot be
     /// given another codec:
@@ -202,7 +244,10 @@ where
         name: impl Into<String>,
         store: Arc<S>,
         service: Svc,
-    ) -> QueueBuilder<Stored<S>, JsonCodec, Svc, Args> {
+    ) -> QueueBuilder<Stored<S>, JsonCodec, Svc, Args>
+    where
+        Svc: tower::Service<TaskRequest<Args>>,
+    {
         let codec = JsonCodec::new(MetadataRegistry::new());
         let bind: fn(&MetadataRegistry) -> JsonCodec = |registry| JsonCodec::new(registry.clone());
         QueueBuilder::new(name.into(), Stored(store), codec, service, Some(bind))
