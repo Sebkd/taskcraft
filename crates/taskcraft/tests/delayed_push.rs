@@ -140,3 +140,43 @@ async fn delayed_task_counts_and_cancels() {
     );
     assert!(source.is_empty());
 }
+
+/// Change memory-queued-status: a queue that has not run yet answers for
+/// the tasks waiting in its in-memory source — queued, and queued with its
+/// moment.
+#[tokio::test(start_paused = true)]
+async fn waiting_tasks_have_a_status() {
+    let queue = Queue::builder(
+        "reminders",
+        Arc::new(InMemorySource::default()),
+        IdentityCodec::new(),
+        task_fn(|_: u32| async {}),
+    )
+    .no_recovery()
+    .build()
+    .unwrap();
+    let (_monitor, handle) = Monitor::new().register(queue).unwrap();
+    let _ = handle.push(Task::new(1).with_id("now")).await.unwrap();
+    let later = Task::new(2).with_id("later").with_delay(HOUR);
+    let _ = handle.push(later).await.unwrap();
+
+    let now = handle
+        .fetch_status(&TaskId::new("now"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(now.state(), taskcraft::TaskState::Queued);
+    let later = handle
+        .fetch_status(&TaskId::new("later"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(later.state(), taskcraft::TaskState::Queued);
+    assert!(
+        later
+            .next_attempt_at()
+            .is_some_and(|t| t > SystemTime::now())
+    );
+    let unknown = handle.fetch_status(&TaskId::new("never")).await.unwrap();
+    assert!(unknown.is_none());
+}

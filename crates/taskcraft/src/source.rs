@@ -449,6 +449,18 @@ pub trait PushSource: Source {
         let _ = (receipt, message, at);
         async { Err(DeferError::Unsupported) }
     }
+
+    /// What the source knows of a task it holds and has not handed out yet
+    /// (spec 2.1.2.14 step 3): queued, or deferred with its moment. `None`
+    /// when it does not hold the task or keeps no such record — the
+    /// default.
+    fn status(
+        &self,
+        id: &TaskId,
+    ) -> impl Future<Output = Result<Option<TaskStatus>, Self::Error>> + Send {
+        let _ = id;
+        async { Ok(None) }
+    }
 }
 
 /// A durable task store: it records accept, progress and every final state,

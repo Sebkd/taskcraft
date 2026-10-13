@@ -13,6 +13,8 @@ use crate::source::{
     AckPointSupport, Capabilities, CloseReason, DeferError, Polled, PushError, PushResult,
     PushSource, Source, WakeHandle, WakeSignal, Withdrawal,
 };
+use crate::state::TaskState;
+use crate::status::TaskStatus;
 use crate::task::{Task, TaskId};
 
 /// Identifies one delivery of an [`InMemorySource`].
@@ -246,6 +248,42 @@ impl<Args: Send + 'static> PushSource for InMemorySource<Args> {
         state.deferred.insert((at, n), message);
         Ok(())
     }
+
+    /// Ready: queued. Held back: queued with its moment when pushed for
+    /// later, deferred when a handler deferred it after an attempt. Handed
+    /// out: unknown here — the registry knows it.
+    async fn status(&self, id: &TaskId) -> Result<Option<TaskStatus>, Infallible> {
+        let state = self.lock();
+        if let Some(task) = state.ready.iter().find(|task| task.id() == id) {
+            let status = TaskStatus::new(
+                id.clone(),
+                TaskState::Queued,
+                task.attempt(),
+                task.retries(),
+            )
+            .with_times(task.accepted_at(), None, None);
+            return Ok(Some(status));
+        }
+        let held = state
+            .deferred
+            .iter()
+            .find(|(_, task)| task.id() == id)
+            .map(|(&(due, _), task)| (due, task));
+        Ok(held.map(|(due, task)| {
+            let kind = if task.attempt() == 0 {
+                TaskState::Queued
+            } else {
+                TaskState::Deferred
+            };
+            // The runtime's moment on the wall clock, paused time included.
+            let at = SystemTime::now() + due.saturating_duration_since(Instant::now());
+            TaskStatus::new(id.clone(), kind, task.attempt(), task.retries()).with_times(
+                task.accepted_at(),
+                None,
+                Some(at),
+            )
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -267,6 +305,52 @@ mod tests {
             Polled::Task { message, receipt } => (message, receipt),
             other => panic!("expected a task, got {other:?}"),
         }
+    }
+
+    /// Change memory-queued-status, criteria 1 and 2: the source answers
+    /// for the tasks it holds and has not handed out.
+    #[tokio::test(start_paused = true)]
+    async fn status_of_held_tasks() {
+        let source = InMemorySource::<u32>::new(8).unwrap();
+        let status = |id: &'static str| {
+            let source = &source;
+            async move { source.status(&TaskId::new(id)).await.unwrap() }
+        };
+        assert_eq!(push(&source, "ready").await, PushResult::Stored);
+        let ready = status("ready").await.unwrap();
+        assert_eq!((ready.state(), ready.attempt()), (TaskState::Queued, 0));
+        assert_eq!(ready.next_attempt_at(), None);
+
+        let hour = Duration::from_secs(3600);
+        let later = SystemTime::now() + hour;
+        let pushed = source
+            .push_at(&TaskId::new("later"), task("later"), later)
+            .await;
+        assert_eq!(pushed.unwrap(), PushResult::Stored);
+        let held = status("later").await.unwrap();
+        assert_eq!(held.state(), TaskState::Queued);
+        let at = held.next_attempt_at().unwrap();
+        let off = at.duration_since(later).unwrap_or_else(|e| e.duration());
+        assert!(off < Duration::from_secs(1), "{off:?}");
+
+        // Handed out: the registry answers, not the source.
+        let (mut taken, receipt) = take(&source).await;
+        assert_eq!(status("ready").await, None);
+
+        // Deferred by its handler after an attempt.
+        taken.begin_attempt();
+        source
+            .defer(receipt, taken, Instant::now() + hour)
+            .await
+            .unwrap();
+        let deferred = status("ready").await.unwrap();
+        assert_eq!(
+            (deferred.state(), deferred.attempt()),
+            (TaskState::Deferred, 1)
+        );
+        assert!(deferred.next_attempt_at().is_some());
+
+        assert_eq!(status("never-pushed").await, None);
     }
 
     #[test]

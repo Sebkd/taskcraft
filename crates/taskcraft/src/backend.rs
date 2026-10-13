@@ -221,8 +221,11 @@ impl<S: PushSource> Backend for Pushed<S> {
         self.0.defer(receipt, message, at)
     }
 
-    async fn status(&self, _: &TaskId) -> Result<Option<TaskStatus>, S::Error> {
-        Ok(None)
+    fn status(
+        &self,
+        id: &TaskId,
+    ) -> impl Future<Output = Result<Option<TaskStatus>, S::Error>> + Send {
+        self.0.status(id)
     }
 
     fn remove(&self, id: &TaskId) -> impl Future<Output = Result<Withdrawal, S::Error>> + Send {
