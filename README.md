@@ -452,6 +452,12 @@ fn monitor() -> Monitor {
 }
 ```
 
+Observers run on the tasks' own path and must be quick. One that writes to
+a network or a slow store goes behind `observe::Buffered::new(observer,
+capacity)`: events are copied into a bounded buffer and handed to it on a
+thread of its own; a full buffer drops events, counts them and logs WARN
+`observer/dropped`.
+
 Logs go through `tracing` with three fields — `event`, `action` and a
 `message` with `key=value` arguments:
 
