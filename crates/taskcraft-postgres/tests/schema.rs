@@ -114,7 +114,7 @@ async fn old_base_is_migrated_once_by_two_processes() {
         .fetch_one(&base.pool)
         .await
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3, "migrations 2 and 3 applied");
     let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM taskcraft_schema")
         .fetch_one(&base.pool)
         .await
@@ -135,7 +135,8 @@ async fn old_base_is_migrated_once_by_two_processes() {
             "taskcraft_tasks_finished",
             "taskcraft_tasks_lease",
             "taskcraft_tasks_owner",
-            "taskcraft_tasks_pkey"
+            "taskcraft_tasks_pkey",
+            "taskcraft_tasks_state"
         ]
     );
     let kept: Vec<(String, String, i32)> =
@@ -173,14 +174,14 @@ async fn newer_schema_is_refused() {
             error,
             PgStoreError::SchemaTooNew {
                 found: 99,
-                supported: 2
+                supported: 3
             }
         ),
         "{error:?}"
     );
     assert_eq!(
         error.to_string(),
-        "task store schema is newer than this library: found=99, supported=2"
+        "task store schema is newer than this library: found=99, supported=3"
     );
     base.drop().await;
 }

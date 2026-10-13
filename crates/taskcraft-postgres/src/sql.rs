@@ -51,6 +51,11 @@ CREATE INDEX taskcraft_tasks_finished
     ON taskcraft_tasks (updated_at)
     WHERE state IN ('succeeded', 'failed', 'panicked', 'cancelled');
 ",
+    // 3: the listing of a queue's tasks by state (change store-task-listing).
+    "
+CREATE INDEX taskcraft_tasks_state
+    ON taskcraft_tasks (queue, state, id);
+",
 ];
 
 /// Serialises schema creation and migrations between processes starting
@@ -99,6 +104,25 @@ RETURNING t.id,
           (t.task || jsonb_build_object('attempt', t.attempt, 'retries', t.retries))::text,
           next.previous";
 
+/// The first `$3` tasks of queue `$1` in state `$2`, by id, with the columns
+/// of a status. Uses `taskcraft_tasks_state`.
+pub(crate) const LIST_FIRST: &str = "
+SELECT id, state, attempt, retries, reason::text, owner,
+       extract(epoch FROM created_at)::float8, extract(epoch FROM next_delivery)::float8
+  FROM taskcraft_tasks
+ WHERE queue = $1 AND state = $2
+ ORDER BY id
+ LIMIT $3";
+
+/// As [`LIST_FIRST`], after id `$4`: the next page.
+pub(crate) const LIST_AFTER: &str = "
+SELECT id, state, attempt, retries, reason::text, owner,
+       extract(epoch FROM created_at)::float8, extract(epoch FROM next_delivery)::float8
+  FROM taskcraft_tasks
+ WHERE queue = $1 AND state = $2 AND id > $4
+ ORDER BY id
+ LIMIT $3";
+
 /// Deletes at most `$2` finished tasks older than `$1` seconds, oldest
 /// first. Uses `taskcraft_tasks_finished`.
 pub(crate) const CLEANUP_BATCH: &str = "
@@ -111,9 +135,10 @@ DELETE FROM taskcraft_tasks
         ORDER BY updated_at
         LIMIT $2)";
 
-/// Criterion 4: on a million tasks the claim and the cleanup go by their
-/// indexes, never through the whole table. Needs `TASKCRAFT_POSTGRES_URL`;
-/// works in a schema of its own, dropped at the end.
+/// Criterion 4 (and change store-task-listing): on a million tasks the
+/// claim, the cleanup and the listing go by their indexes, never through
+/// the whole table. Needs `TASKCRAFT_POSTGRES_URL`; works in a schema of its
+/// own, dropped at the end.
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -127,7 +152,8 @@ mod tests {
 INSERT INTO taskcraft_tasks
        (queue, id, task, state, next_delivery, owner, lease_until, created_at, updated_at)
 SELECT 'q' || (n % 10), 't' || n, '{}'::jsonb,
-       CASE WHEN n % 100 < 90 THEN 'succeeded'
+       CASE WHEN n % 100 < 89 THEN 'succeeded'
+            WHEN n % 100 < 90 THEN 'failed'
             WHEN n % 100 < 95 THEN 'queued'
             WHEN n % 100 < 98 THEN 'deferred'
             ELSE 'running' END,
@@ -155,6 +181,21 @@ SELECT 'q' || (n % 10), 't' || n, '{}'::jsonb,
                 .fetch_all(pool)
                 .await
                 .unwrap(),
+            Binds::ListFirst => sqlx::query_scalar(explain)
+                .bind("q3")
+                .bind("failed")
+                .bind(100_i64)
+                .fetch_all(pool)
+                .await
+                .unwrap(),
+            Binds::ListAfter => sqlx::query_scalar(explain)
+                .bind("q3")
+                .bind("failed")
+                .bind(100_i64)
+                .bind("t500000")
+                .fetch_all(pool)
+                .await
+                .unwrap(),
         };
         lines.join("\n")
     }
@@ -162,6 +203,8 @@ SELECT 'q' || (n % 10), 't' || n, '{}'::jsonb,
     enum Binds {
         Claim,
         Cleanup,
+        ListFirst,
+        ListAfter,
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -208,6 +251,8 @@ SELECT 'q' || (n % 10), 't' || n, '{}'::jsonb,
             (CLAIM_DUE, Binds::Claim, "taskcraft_tasks_due"),
             (CLAIM_EXPIRED, Binds::Claim, "taskcraft_tasks_lease"),
             (CLEANUP_BATCH, Binds::Cleanup, "taskcraft_tasks_finished"),
+            (LIST_FIRST, Binds::ListFirst, "taskcraft_tasks_state"),
+            (LIST_AFTER, Binds::ListAfter, "taskcraft_tasks_state"),
         ];
         for (statement, binds, index) in checks {
             let plan = plan(&pool, statement, binds).await;

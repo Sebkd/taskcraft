@@ -99,7 +99,10 @@ async fn store(pool: sqlx::PgPool) -> Result<PgStore, PgStoreError> {
   created by 0.1 or 0.2 is migrated in place, tasks and history kept. The
   first start on an older base builds indexes, holding writes to the tasks
   table meanwhile. A base migrated by a newer version is refused
-  (`PgStoreError::SchemaTooNew`): update every process.
+  (`PgStoreError::SchemaTooNew`): update every process. Version 0.3.3
+  migrates the schema to version 3 (the index of task listing): once a
+  0.3.3 process has started, processes of 0.3.2 or older no longer start
+  on that base — roll out forward only.
 - **Claim on poll.** A statement with `FOR UPDATE SKIP LOCKED` takes the
   next task for this process — first one whose owner's lease expired, then
   the earliest due one — each through its own index: no task reaches two
@@ -156,6 +159,33 @@ println!("{released} tasks back in their queues");
 A process counts as retired once its "alive" mark is older than two alive
 intervals of the calling store; keep the interval the same across the
 deployment.
+
+## Finding tasks
+
+`tasks` lists the tasks of a queue in one state, by id, page by page — for
+example the failed ones, to run again once their data is fixed:
+
+```rust,no_run
+# async fn failed(
+#     store: taskcraft_postgres::PgStore,
+#     invoices: taskcraft::QueueHandle<String>,
+# ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+use taskcraft::TaskState;
+
+let mut after = None;
+loop {
+    let page = store.tasks("invoices", TaskState::Failed, after.as_ref(), 100).await?;
+    for status in &page {
+        invoices.requeue(status.id()).await?;
+    }
+    let Some(last) = page.last() else { break };
+    after = Some(last.id().clone());
+}
+# Ok(()) }
+```
+
+Pages go by an index: a page reads the tasks it returns, however many
+others the queue keeps.
 
 ## Testing
 

@@ -730,6 +730,77 @@ async fn close_releases_unfinished_tasks() {
     }
 }
 
+/// Change store-task-listing: the failed tasks of a queue, page by page, by
+/// id, without repeats and without the tasks of another queue.
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_tasks_are_listed_by_pages() {
+    let Some(url) = url() else { return };
+    let (name, other) = (unique("q"), unique("q"));
+    let store = store(&url, &unique("p"), false).await;
+    let seen = Arc::default();
+    let (monitor, handle) = queue(&name, store.queue(&name), &seen);
+    let (other_monitor, other_handle) = queue(&other, store.queue(&other), &seen);
+    let (running, stop) = run(monitor);
+    let (other_running, other_stop) = run(other_monitor);
+
+    // 1 aborts: every third task fails.
+    let ids: Vec<String> = (0..25).map(|i| format!("t{i:02}")).collect();
+    for (i, id) in ids.iter().enumerate() {
+        let n = u32::from(i % 3 == 0);
+        let _ = handle
+            .push(Task::new(n).with_id(id.as_str()))
+            .await
+            .unwrap();
+    }
+    let _ = other_handle
+        .push(Task::new(1).with_id("t01"))
+        .await
+        .unwrap();
+    for id in &ids {
+        assert!(
+            until(10 * SEC, async || state(&handle, id)
+                .await
+                .is_some_and(TaskState::is_terminal))
+            .await,
+            "{id} did not finish"
+        );
+    }
+    assert!(
+        until(10 * SEC, async || state(&other_handle, "t01").await
+            == Some(TaskState::Failed))
+        .await
+    );
+
+    let mut listed = Vec::new();
+    let mut after: Option<TaskId> = None;
+    loop {
+        let page = store
+            .tasks(&name, TaskState::Failed, after.as_ref(), 4)
+            .await
+            .unwrap();
+        assert!(page.len() <= 4);
+        for status in &page {
+            assert_eq!(status.state(), TaskState::Failed);
+            assert!(status.reason().is_some(), "the reason comes with it");
+        }
+        let Some(last) = page.last() else { break };
+        after = Some(last.id().clone());
+        listed.extend(page.iter().map(|s| s.id().as_str().to_owned()));
+    }
+    let failed: Vec<String> = ids.iter().step_by(3).cloned().collect();
+    assert_eq!(listed, failed, "all of them, by id, once");
+    let none = store
+        .tasks(&name, TaskState::Failed, None, 0)
+        .await
+        .unwrap();
+    assert!(none.is_empty(), "limit 0");
+
+    stop.cancel();
+    other_stop.cancel();
+    running.await.unwrap();
+    other_running.await.unwrap();
+}
+
 /// The records of a thread while installed, as `field=value` lines.
 #[derive(Clone, Default)]
 struct Logs(Arc<Mutex<Vec<String>>>);

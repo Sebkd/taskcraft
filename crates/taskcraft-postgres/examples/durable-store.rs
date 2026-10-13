@@ -145,6 +145,13 @@ async fn main() -> Result<(), BoxError> {
         .push(Task::new("typo".to_owned()).with_id("typo"))
         .await?;
     wait_for(&handle, "typo", TaskState::Failed).await?;
+    // Found among the failed tasks of the queue, then run again.
+    let failed = store
+        .tasks(&queue_name, TaskState::Failed, None, 100)
+        .await?;
+    if failed.iter().map(|s| s.id().as_str()).collect::<Vec<_>>() != ["typo"] {
+        return Err("expected typo as the one failed task".into());
+    }
     handle.requeue(&TaskId::new("typo")).await?;
     wait_for(&handle, "typo", TaskState::Succeeded).await?;
     println!("  typo: requeued and done");

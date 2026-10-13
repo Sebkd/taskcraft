@@ -160,7 +160,7 @@ fn count(n: u32) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
 }
 
-type StatusRow = (
+pub(crate) type StatusRow = (
     String,
     i32,
     i32,
@@ -394,27 +394,28 @@ impl TaskStore for PgSource {
         .bind(id.as_str())
         .fetch_optional(&self.shared.pool)
         .await?;
-        let Some((state, attempt, retries, reason, owner, created, next)) = row else {
-            return Ok(None);
-        };
-        let state = parse_state(&state)?;
-        let attempt = u32::try_from(attempt).unwrap_or(0);
-        let retries = u32::try_from(retries).unwrap_or(0);
-        let mut status = TaskStatus::new(id.clone(), state, attempt, retries).with_times(
-            time(created),
-            None,
-            time(next),
-        );
-        if let Some(reason) = reason {
-            let reason: FinishReason =
-                serde_json::from_str(&reason).map_err(|e| PgStoreError::Data(e.to_string()))?;
-            status = status.with_reason(reason);
-        }
-        if let Some(owner) = owner
-            && !state.is_terminal()
-        {
-            status = status.with_owner(owner);
-        }
-        Ok(Some(status))
+        row.map(|row| status_of(id.clone(), row)).transpose()
     }
+}
+
+/// A task's status from its row: state, counts, reason, the owner of a live
+/// task, the moments of creation and next delivery.
+pub(crate) fn status_of(id: TaskId, row: StatusRow) -> Result<TaskStatus, PgStoreError> {
+    let (state, attempt, retries, reason, owner, created, next) = row;
+    let state = parse_state(&state)?;
+    let attempt = u32::try_from(attempt).unwrap_or(0);
+    let retries = u32::try_from(retries).unwrap_or(0);
+    let mut status =
+        TaskStatus::new(id, state, attempt, retries).with_times(time(created), None, time(next));
+    if let Some(reason) = reason {
+        let reason: FinishReason =
+            serde_json::from_str(&reason).map_err(|e| PgStoreError::Data(e.to_string()))?;
+        status = status.with_reason(reason);
+    }
+    if let Some(owner) = owner
+        && !state.is_terminal()
+    {
+        status = status.with_owner(owner);
+    }
+    Ok(status)
 }
