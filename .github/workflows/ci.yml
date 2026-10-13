@@ -55,6 +55,11 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
+      # The examples script is not run in CI (examples are run by hand
+      # before a release), but it is linted: shellcheck ships with the runner.
+      - name: Shell scripts
+        run: shellcheck scripts/*.sh
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
