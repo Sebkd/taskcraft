@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Semaphore;
@@ -22,7 +22,7 @@ use crate::outcome::{BoxError, Outcome};
 use crate::queue::Queue;
 use crate::registry::TaskRegistry;
 use crate::source::CloseReason;
-use crate::worker::{PoolClaim, run_worker};
+use crate::worker::{Gauge, PoolClaim, run_worker};
 
 /// Why a queue's worker stopped.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,7 +122,7 @@ type StartFn = Box<dyn FnOnce() -> BoxFuture<'static, Result<WorkerFn, BoxError>
 struct Pool {
     size: u32,
     semaphore: Arc<Semaphore>,
-    in_use: Arc<Mutex<u32>>,
+    in_use: Arc<Gauge>,
 }
 
 /// A registered queue, not started yet.
@@ -237,7 +237,7 @@ impl Monitor {
         let pool = Pool {
             size,
             semaphore,
-            in_use: Arc::new(Mutex::new(0)),
+            in_use: Arc::default(),
         };
         self.pools.insert(name, pool);
         Ok(self)
