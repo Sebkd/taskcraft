@@ -15,8 +15,10 @@ use crate::state::TaskState;
 use crate::status::FinishReason;
 use crate::task::TaskId;
 
+mod buffered;
 #[cfg(feature = "metrics")]
 mod metrics;
+pub use self::buffered::Buffered;
 #[cfg(feature = "metrics")]
 pub use self::metrics::MetricsObserver;
 
