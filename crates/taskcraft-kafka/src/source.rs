@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rdkafka::consumer::{
     BaseConsumer, CommitMode, Consumer, ConsumerContext, Rebalance, StreamConsumer,
@@ -110,7 +110,7 @@ impl ConsumerContext for Callbacks {
                 next,
                 error.to_string()
             );
-            lock(&self.commits).commit_failed(element.partition(), next);
+            lock(&self.commits).commit_failed(element.partition(), next, Instant::now());
         }
         // Counted as a source error by the worker (change kafka-commit-errors).
         let _ = self.notify.send(Notice::SourceError(format!(
@@ -291,6 +291,24 @@ impl fmt::Debug for KafkaSource {
     }
 }
 
+impl KafkaSource {
+    /// Commits again the boundaries the broker refused, once their pause is
+    /// over: without it a partition whose tasks are all done would wait for
+    /// a new message to commit (change kafka-commit-retry).
+    fn retry_commits(&self) -> Result<(), KafkaSourceError> {
+        let due = lock(&self.commits).retry(Instant::now());
+        if due.is_empty() {
+            return Ok(());
+        }
+        let mut offsets = TopicPartitionList::new();
+        for (partition, next) in due {
+            offsets.add_partition_offset(&self.topic, partition, Offset::Offset(next))?;
+        }
+        self.consumer.commit(&offsets, CommitMode::Async)?;
+        Ok(())
+    }
+}
+
 impl Source for KafkaSource {
     type Message = KafkaMessage;
     type Receipt = KafkaReceipt;
@@ -305,6 +323,7 @@ impl Source for KafkaSource {
         if let Some(failure) = failure {
             return Err(KafkaSourceError::Broker(failure));
         }
+        self.retry_commits()?;
         let Ok(received) = tokio::time::timeout(self.max_wait, self.consumer.recv()).await else {
             self.wake.wake();
             return Ok(Polled::Empty);
