@@ -51,7 +51,11 @@ where
 fn queue_of<Svc>(
     source: &Faulty,
     service: Svc,
-) -> QueueBuilder<Pushed<FaultySource<u32>>, FaultyCodec<u32>, Svc, u32> {
+) -> QueueBuilder<Pushed<FaultySource<u32>>, FaultyCodec<u32>, Svc, u32>
+where
+    // Since 0.4 the constructors tie the service to the arguments.
+    Svc: tower::Service<taskcraft::handler::TaskRequest<u32>>,
+{
     Queue::builder("q", Arc::clone(source), FaultyCodec::new(), service)
 }
 

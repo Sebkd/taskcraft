@@ -4,7 +4,7 @@
 >
 > **Design**: [design.md](design.md)
 >
-> **Статус**: В реализации
+> **Статус**: Архивировано
 >
 > **Автор**: Андрей Серохвостов
 >
@@ -14,21 +14,21 @@
 
 ## 1. Реализация
 
-- [ ] 1.1 Граница `Svc: Service<TaskRequest<Args>>` в `builder`, `consumer`, `on_store` (D-1)
-- [ ] 1.2 `tests/worker.rs`: граница в обобщённом хелпере
+- [x] 1.1 Граница `Svc: Service<TaskRequest<Args>>` в `builder`, `consumer`, `on_store` (D-1)
+- [x] 1.2 `tests/worker.rs`: граница в обобщённом хелпере
 
 ## 2. Документация
 
-- [ ] 2.1 Doc-тесты без `register`; README Kafka без обхода (D-3)
-- [ ] 2.2 `MIGRATION.md`, раздел «0.3 → 0.4» (D-2)
+- [x] 2.1 Doc-тесты без `register`; README Kafka без обхода (D-3)
+- [x] 2.2 `MIGRATION.md`, раздел «0.3 → 0.4» (D-2)
 
 ## 3. Спецификация
 
-- [ ] 3.1 2.5, критерий №96, таблица статусов, версия спецификации
+- [x] 3.1 2.5, критерий №96, таблица статусов, версия спецификации
 
 ## 4. Финализация
 
-- [ ] 4.1 Локально: fmt, clippy, test, doc, readme-check, примеры; CI зелёный
+- [x] 4.1 Локально: fmt, clippy, test, doc, readme-check, примеры; CI зелёный
 
 ---
 

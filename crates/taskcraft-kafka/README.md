@@ -89,7 +89,7 @@ let queue = Queue::consumer("payments", source, KafkaJsonCodec::new(MetadataRegi
     .retry_policy(RetryPolicy { max_attempts: 5, hold_slot: true, ..RetryPolicy::default() })
     .ack_point(AckPoint::OnCompletion)
     .build()?;
-# let _ = taskcraft::Monitor::new().register(queue)?;
+# let _ = queue;
 # Ok(()) }
 ```
 
