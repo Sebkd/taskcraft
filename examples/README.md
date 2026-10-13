@@ -39,6 +39,23 @@ docker compose -f examples/docker-compose.yml down              # afterwards
 `TASKCRAFT_KAFKA_BROKERS` and `TASKCRAFT_POSTGRES_URL` point the examples at
 other addresses.
 
+## Running all examples
+
+Before a release every example runs, in order, with a result for each:
+
+```sh
+scripts/run-examples.sh --require-services      # all of them; all must be ok
+scripts/run-examples.sh hello durable-store     # some, by name
+```
+
+The script builds the examples first, then runs each with a 300 s limit
+(`TASKCRAFT_EXAMPLE_LIMIT`) and keeps its output in
+`target/examples-run/<name>.log`. Kafka and PostgreSQL come from
+`TASKCRAFT_KAFKA_BROKERS` / `TASKCRAFT_POSTGRES_URL` when they answer, or from
+`docker-compose.yml` here, stopped again afterwards. Without either their
+examples are skipped — a failure with `--require-services`. E-11 runs as a
+scenario: push, push again, status, cancel, Ctrl-C.
+
 ## Notes
 
 - E-15 uses the adapter for statecraft-fsm as it is today: the machine leaves
@@ -49,4 +66,5 @@ other addresses.
   observer), so the recovery hook brings back only exports still in progress
   — not cancelled or panicked ones.
 - CI builds and lints every example; it does not run them. A change that
-  alters what an example shows updates that example and runs it by hand.
+  alters what an example shows updates that example and runs it by hand
+  (`scripts/run-examples.sh <name>`).
