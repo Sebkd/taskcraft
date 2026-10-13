@@ -1,6 +1,7 @@
 # Fuzz targets for the decoders (change concurrency-and-fuzz-tests). Outside
-# the workspace: libFuzzer needs nightly. Run from this directory:
-#   cargo +nightly fuzz run json_decode -- -max_total_time=600
+# the workspace: libFuzzer needs nightly, pinned in rust-toolchain.toml.
+# Run from this directory:
+#   cargo fuzz run json_decode -- -max_total_time=600
 [package]
 name = "taskcraft-fuzz"
 version = "0.0.0"
