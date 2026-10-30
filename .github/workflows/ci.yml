@@ -116,6 +116,30 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features --locked
 
+  # The core promises an older compiler than the rest (rust-version 1.96, for
+  # its first consumer): its tests with every feature, its examples and a
+  # build without features run on exactly that release.
+  msrv-core:
+    name: MSRV core (1.96.1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.96.1
+        uses: dtolnay/rust-toolchain@1.96.1
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test (log, metrics, test-util)
+        run: .github/annotate.sh test.log cargo test -p taskcraft --all-features --locked
+
+      - name: Examples
+        run: .github/annotate.sh examples.log cargo build -p taskcraft --all-features --examples --locked
+
+      - name: Without features
+        run: .github/annotate.sh build.log cargo build -p taskcraft --locked
+
   macos:
     name: macOS
     runs-on: macos-latest

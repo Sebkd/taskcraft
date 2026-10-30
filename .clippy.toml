@@ -1,4 +1,5 @@
-msrv = "1.99"
+# No `msrv`: clippy takes each package's `rust-version` (the core 1.96,
+# the others 1.99).
 # Tests may unwrap and panic: a failed unwrap is a failed test.
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true

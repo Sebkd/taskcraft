@@ -4,7 +4,7 @@
 [![crates.io](https://img.shields.io/crates/v/taskcraft.svg)](https://crates.io/crates/taskcraft)
 [![docs.rs](https://img.shields.io/docsrs/taskcraft)](https://docs.rs/taskcraft)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Sebkd/taskcraft/blob/master/LICENSE)
-[![MSRV](https://img.shields.io/badge/MSRV-1.99-blue.svg)](https://github.com/rust-lang/rust/blob/master/RELEASES.md)
+[![MSRV](https://img.shields.io/badge/MSRV-1.96-blue.svg)](https://github.com/rust-lang/rust/blob/master/RELEASES.md)
 
 Background task queue for Rust on tokio, built for long, heavy and
 stateful work: tasks that run for hours, hold scarce resources, survive a
@@ -552,7 +552,8 @@ with `test-util`.
 
 ## Requirements
 
-Rust 1.99 or newer, edition 2024, the tokio runtime.
+Rust 1.96 or newer, edition 2024, the tokio runtime. The Kafka and
+PostgreSQL packages need Rust 1.99.
 
 ## Acknowledgements
 
