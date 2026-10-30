@@ -1,5 +1,7 @@
 # Migrating taskcraft
 
+- 0.4.0 → 0.4.1 (compatible): `taskcraft` builds on Rust 1.96; the Kafka
+  and PostgreSQL packages stay on 1.99. No code changes.
 - [0.3 → 0.4](#migrating-from-taskcraft-03-to-04): errors of the Kafka
   source and the PostgreSQL store no longer expose driver types; queue
   constructors tie the service to the arguments.

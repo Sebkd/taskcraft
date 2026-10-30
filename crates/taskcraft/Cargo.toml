@@ -2,7 +2,7 @@
 name = "taskcraft"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+rust-version = "1.96"
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
