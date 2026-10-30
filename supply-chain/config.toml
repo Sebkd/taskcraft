@@ -91,10 +91,6 @@ criteria = "safe-to-deploy"
 version = "0.2.17"
 criteria = "safe-to-deploy"
 
-[[exemptions.cpufeatures]]
-version = "0.3.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.crc]]
 version = "3.4.0"
 criteria = "safe-to-deploy"
@@ -132,7 +128,7 @@ version = "0.2.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.ctutils]]
-version = "0.4.3"
+version = "0.4.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.digest]]
@@ -312,7 +308,7 @@ version = "0.2.190"
 criteria = "safe-to-deploy"
 
 [[exemptions.libz-sys]]
-version = "1.1.29"
+version = "1.1.31"
 criteria = "safe-to-deploy"
 
 [[exemptions.linux-raw-sys]]
@@ -433,10 +429,6 @@ criteria = "safe-to-run"
 
 [[exemptions.r-efi]]
 version = "5.2.0"
-criteria = "safe-to-run"
-
-[[exemptions.r-efi]]
-version = "6.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.rand]]
@@ -627,10 +619,6 @@ criteria = "safe-to-deploy"
 version = "3.0.6"
 criteria = "safe-to-deploy"
 
-[[exemptions.sync_wrapper]]
-version = "0.1.2"
-criteria = "safe-to-deploy"
-
 [[exemptions.synstructure]]
 version = "0.14.0"
 criteria = "safe-to-deploy"
@@ -655,12 +643,8 @@ criteria = "safe-to-run"
 version = "0.8.4"
 criteria = "safe-to-deploy"
 
-[[exemptions.tinyvec]]
-version = "1.13.3"
-criteria = "safe-to-deploy"
-
 [[exemptions.tokio]]
-version = "1.53.2"
+version = "1.54.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.tokio-macros]]
@@ -772,7 +756,7 @@ version = "0.3.106"
 criteria = "safe-to-run"
 
 [[exemptions.webpki-roots]]
-version = "1.0.9"
+version = "1.0.11"
 criteria = "safe-to-deploy"
 
 [[exemptions.whoami]]
